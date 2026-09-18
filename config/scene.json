@@ -1,0 +1,19 @@
+{
+  "timestep_s": 0.002,
+  "control_steps": 10,
+  "retracted_y_m": -0.48,
+  "bin_size_xyz_m": [0.30, 0.22, 0.12],
+  "slot_size_xyz_m": [0.45, 0.30, 0.30],
+  "slots": {
+    "A1": [0.0, 0.20, 0.38],
+    "B1": [0.55, 0.20, 0.38],
+    "A2": [0.0, 0.20, 0.76],
+    "B2": [0.55, 0.20, 0.76]
+  },
+  "reception_xyz_m": [1.12, 0.20, 0.38],
+  "axis_speed_m_s": 0.30,
+  "axis_acceleration_m_s2": 0.60,
+  "motion_timeout_s": 18.0,
+  "pick_clearance_m": 0.018,
+  "lift_m": 0.055
+}

@@ -1,0 +1,13 @@
+{
+  "catalog": {
+    "TORNILLOS": "Tornillos M6",
+    "TUERCAS": "Tuercas M6",
+    "ARANDELAS": "Arandelas M6"
+  },
+  "bins": [
+    {"id": "box-1", "sku": "TORNILLOS", "home_slot_id": "A1"},
+    {"id": "box-2", "sku": "TUERCAS", "home_slot_id": "B1"},
+    {"id": "box-3", "sku": "ARANDELAS", "home_slot_id": "A2"}
+  ],
+  "alert_min_confidence": 0.70
+}
