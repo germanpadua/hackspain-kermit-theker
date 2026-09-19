@@ -18,7 +18,9 @@ from .scene import tray_pocket_world
 from .sim import DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.022    # gp above piece origin -> pads pinch post under head
+PINCH_GP_OFFSET = 0.016    # low on the post: deeper pad wrap; the head brim
+                           # still blocks slip-out and the base top stays
+                           # 8 mm below the pad line
 
 
 DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
@@ -166,7 +168,7 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0035, 0.0235)):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0055, 0.019)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
         when the piece is held. Caller supplies the perceived piece position;
         `pinch_band` tightens the encoder acceptance (vision picks)."""
@@ -245,7 +247,7 @@ class Skills:
             self.spin(40)
             rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
             if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
-                    and -0.01 < rel[2] < 0.098):
+                    and -0.02 < rel[2] < 0.098):
                 return True
         return False
 

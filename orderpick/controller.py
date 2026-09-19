@@ -159,7 +159,7 @@ class Controller:
                 # instead of the neck: fing width >0.0155 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.0045, 0.0155)):
+                                              pinch_band=(0.0055, 0.0155)):
                     self.log("pick_miss", piece="?", bin=bin_id)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
@@ -249,7 +249,7 @@ class Controller:
         tp = self.sim.truth_body_pos("tray")
         rel = self.piece_pos_oracle(name) - tp
         return (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
-                and -0.01 < rel[2] < 0.098)
+                and -0.02 < rel[2] < 0.098)
 
     def _make_tray_verify(self):
         """Vision place check: the piece must be SEEN inside the tray floor
@@ -563,7 +563,7 @@ class Controller:
         for n in self.sim.piece_qadr:
             rel = tq.T @ (self.sim.truth_body_pos(n) - tp)
             if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09 \
-                    and -0.01 < rel[2] < 0.10:
+                    and -0.02 < rel[2] < 0.10:
                 sku = getattr(self, "_bin_sku", {}).get(
                     self.sim.piece_bin.get(n), "?")
                 counts[sku] = counts.get(sku, 0) + 1
