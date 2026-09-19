@@ -134,11 +134,12 @@ conteos correctos en ambas versiones):
 | Máximo | 20,787 mm | 7,044 mm |
 
 En esa revisión la media bajó un 82,4 %, pero el máximo superaba 5 mm y la
-calibración devolvía 1. Después de integrar los marcadores de `261070c`, la
-medición actual obtiene **media 1,742 mm y máximo 2,271 mm**, con 9/9 regiones
-legibles y conteos correctos; devuelve 0. Esta última comparación incluye
-cambios tanto de geometría como de percepción. Mide piezas visibles, no
-fiabilidad del ciclo completo ni escenas ocluidas.
+calibración devolvía 1. Con los marcadores de `261070c` se midieron
+1,742 mm de media y 2,271 mm de máximo. Tras integrar `479a46a`, la medición
+actual obtiene **media 2,341 mm y máximo 3,787 mm**, con 9/9 regiones
+legibles y conteos correctos; devuelve 0. Estas comparaciones incluyen cambios
+de geometría y pose de observación, no solo percepción. Miden piezas visibles,
+no fiabilidad del ciclo completo ni escenas ocluidas.
 
 ```bash
 MUJOCO_GL=egl .venv/bin/python -m orderpick.calibrate --seeds 7 8 9
@@ -180,65 +181,79 @@ continuar; `perception_stops` cuenta episodios detenidos por percepción.
 evaluación física rechaza, **no éxitos aceptados**. El tiempo real incluye la
 ventana de verificación de 0,5 s y excluye construir la escena y escribir JSON.
 
-Medición del 19-09-2026, base integrada `261070c`, código de `e3c04bb`.
+Medición del 19-09-2026, base integrada `479a46a`, código de `1864a5a`.
 Semillas nominales **7, 8, 9**; cada fila suma sus tres episodios:
 
 | Receta / modo | Exactas | Incompletas | Unidades faltantes | En suelo / pérdidas declaradas | Paradas por percepción | Σ sim / Σ real (s) |
 |---|---:|---:|---:|---:|---:|---:|
-| Producción / oracle | 2/3 | 1 | 1 | 0 / 0 | 0 | 1040,8 / 105,4 |
-| Producción / vision | 0/3 | 3 | 6 | 3 / 3 | 0 | 1119,4 / 118,2 |
-| Mantenimiento / oracle | 3/3 | 0 | 0 | 0 / 0 | 0 | 607,1 / 56,9 |
-| Mantenimiento / vision | 0/3 | 3 | 3 | 3 / 3 | 0 | 541,5 / 59,7 |
+| Producción / oracle | 3/3 | 0 | 0 | 0 / 0 | 0 | 1129,4 / 113,5 |
+| Producción / vision | 0/3 | 3 | 4 | 2 / 11 | 0 | 1806,4 / 191,6 |
+| Mantenimiento / oracle | 3/3 | 0 | 0 | 0 / 0 | 0 | 605,6 / 57,3 |
+| Mantenimiento / vision | 2/3 | 1 | 1 | 0 / 2 | 0 | 675,5 / 70,8 |
 
-Producción oracle entrega las semillas 7 y 9; la 8 falla al recoger la
-segunda unidad desde la reserva. En visión quedan fallos de agarre en
-reserva y pérdida del rodamiento durante recogida/colocación. **La célula
-visual no completa ninguna de estas seis órdenes nominales**: no se debe
-presentar como autonomía sensorial ni producción repetible.
+Oracle completa ambas recetas en esta muestra. Mantenimiento visual entrega
+las semillas 7 y 8, pero no la 9. Producción visual falla las tres: hay
+rechazos de agarre y colocación, dos piezas en suelo y un rodamiento en
+compartimento incorrecto. La semilla 7 contiene además **un engranaje sobrante**,
+aunque el controlador informa `order_shortfall`: consultar también
+`assessment`, no interpretar esa causa como un inventario físico.
+**Producción visual sigue sin resolverse** y tres semillas no demuestran
+fiabilidad industrial ni autonomía sensorial completa.
 
-Antes de priorizar la pieza más frontal de la reserva, la integración daba
-0/3 en producción oracle con el mismo evaluador. La corrección de Z usando
-el marcador RGB-D elimina los 18 `pick_miss` nominales de mantenimiento
-visual, pero descubre tres pérdidas posteriores: **mejorar localización
-no ha resuelto la entrega**. Se conservan ambos lotes.
+Comparación con el mismo evaluador, sin eliminar los lotes intermedios:
+
+| Código / base integrada | Producción oracle / vision | Mantenimiento oracle / vision |
+|---|---:|---:|
+| `e3c04bb` / `261070c` | 2/3 / 0/3 | 3/3 / 0/3 |
+| `50214da` / `a7d951a` | 0/3 / 3/3 | 3/3 / 1/3 |
+| `1864a5a` / `479a46a` | 3/3 / 0/3 | 3/3 / 2/3 |
+
+La última base incorpora agarre con `DOWN`, aproximación semiabierta y banda
+de pinza `(0.0045, 0.022)`. Se mantienen su geometría y control, ajustando
+`PART_MARKER_TOP_M` a 42,6 mm para conservar la profundidad RGB-D medida y
+adaptando sus diagnósticos a `CellSim.render`. La mejora de oracle coincide
+con una **regresión de producción visual respecto a `50214da`**. No se
+modificaron el evaluador físico, sus tolerancias ni las pruebas para integrar
+estas bases; no atribuir la comparación a un cambio aislado.
 
 Matriz de fallos, semilla **7**, una ejecución por modo y fila:
 
 | Escenario / receta | Exactas oracle / vision | Evidencia y alcance |
 |---|---:|---|
-| `front_empty` / mantenimiento | 0 / 0 | Avanza reserva, pero falla la recogida posterior |
-| `piece_displaced` / mantenimiento | 1 / 0 | Desplazamiento inicial de 22 mm; visión pierde rodamiento |
+| `front_empty` / mantenimiento | 1 / 1 | Ambos avanzan reserva y entregan; oracle registra una pérdida intermedia |
+| `piece_displaced` / mantenimiento | 1 / 1 | Desplazamiento inicial de 22 mm |
 | `obs_occluded` / mantenimiento | 1 / 0 | Visión se detiene tras 3 observaciones UNKNOWN; oracle no usa esa cámara |
-| `obs_glitch` / mantenimiento | 1 / 0 | Visión registra 2 observaciones inválidas y continúa; falla después |
-| `park_blocked` / mantenimiento | 1 / 0 | La receta no necesita reserva; no ejercita ese bloqueo |
-| `reception_blocked` / mantenimiento | 0 / 0 | Oracle rechaza la estación; visión falla antes de llegar |
-| `delivery_out_of_tolerance` / mantenimiento | 0 / 0 | Oracle declara descarga, pero la evaluación rechaza la bandeja desviada; visión falla antes |
-| `grasp_slip` / mantenimiento | 1 / 0 | Bajar fricción no fuerza una caída en oracle; visión pierde rodamiento |
+| `obs_glitch` / mantenimiento | 1 / 1 | Visión registra 2 observaciones inválidas y completa tras reintentar |
+| `park_blocked` / mantenimiento | 1 / 1 | La receta no necesita reserva; no ejercita ese bloqueo |
+| `reception_blocked` / mantenimiento | 0 / 0 | Ambos rechazan la estación ocupada |
+| `delivery_out_of_tolerance` / mantenimiento | 0 / 0 | Ambos declaran descarga, pero la evaluación rechaza la bandeja desviada |
+| `grasp_slip` / mantenimiento | 1 / 1 | La reducción de fricción no fuerza una caída en esta semilla |
 | `reserve_empty` / producción | 0 / 0 | Cantidad insuficiente; ninguna entrega se acepta |
 | `park_blocked` / producción | 0 / 0 | Ambos modos rechazan aparcamiento y no avanzan reserva |
 
-En los **32 episodios**: 10 entregas exactas y 22 órdenes incompletas/no
-entregadas; 31 unidades faltantes, 12 piezas en suelo, 12 eventos de pérdida,
-0 piezas mal ubicadas, 5 observaciones inválidas y 1 parada por percepción.
-Tiempo acumulado: **6673,9 s simulados / 673,6 s reales**. Hubo una señal
-optimista `false_success` del controlador, en la descarga desviada; el
-evaluador la rechazó. No sumar fallos gestionados a entregas correctas ni
+En los **32 episodios**: 19 entregas exactas y 13 órdenes incompletas/no
+entregadas; 18 unidades faltantes, 1 sobrante, 2 piezas en suelo, 17 eventos
+de pérdida declarados, 3 piezas mal ubicadas, 7 observaciones inválidas y
+1 parada por percepción. Tiempo acumulado: **8321,0 s simulados / 838,0 s
+reales**. Hubo dos señales optimistas `false_success` del controlador,
+en la descarga desviada; el evaluador rechazó ambas. No sumar fallos
+gestionados a entregas correctas ni
 usar esta mezcla de nominales y fallos como tasa de fiabilidad.
 
 Artefactos completos, incluidos fallos y eventos:
 
-- `runs/kitting-production/20260919T070515-5b8b3404c7`
-- `runs/kitting-service/20260919T070516-680b36bbd7`
-- `runs/kitting-faults/20260919T070517-f1c00c023d`
-- `runs/kitting-reserve/20260919T070518-e85f54b910`
-- `runs/kitting-calibration/20260919T070844-adce11569a`
-- Comparación anterior: `runs/integrated-production/20260919T070122-3176773c95`
-  y `runs/integrated-service/20260919T070123-ca39ac2abb`.
+- `runs/merge-479a46a-production/20260919T100258-ee21910d7a`
+- `runs/merge-479a46a-service/20260919T100259-dea4200844`
+- `runs/merge-479a46a-faults/20260919T100300-40df9335e7`
+- `runs/merge-479a46a-extra-faults/20260919T100301-eb81780d02`
+- `runs/merge-479a46a-calibration/20260919T100302-28b2212a30`
+- Comparaciones anteriores conservadas en `runs/kitting-*`,
+  `runs/merge-a7d951a-*` y `runs/integrated-*`.
 
-Los cinco lotes de medición `kitting-*` listados registran el mismo `source_sha256`:
-`7790bfc73427b10c5c8dd6405cd71625fed51e97dc1a6c9b8c54e6a3808754bf`.
-Se ejecutaron antes de registrar el commit `e3c04bb`; el hash de fuentes se
-comprobó idéntico después. Los tiempos de pared proceden de procesos
+Los cinco lotes actuales registran el mismo `source_sha256`:
+`898878df90d45f009a85a2aec8c5e63ad144cec849d67fc2f265eef8250673b8`,
+con `git_commit=1864a5aae63114a0289705e44eb82ecd3b6ac149`.
+Los tiempos de pared proceden de procesos
 concurrentes en la VM; no son medidas de hardware industrial. `runs/` se
 exporta como evidencia, no está versionado.
 
