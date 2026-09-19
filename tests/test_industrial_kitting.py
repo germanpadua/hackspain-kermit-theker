@@ -183,3 +183,15 @@ def test_tray_vision_covers_valid_pieces_near_inner_wall(cell):
     assert status == "ok"
     assert [sku for sku, _ in hits] == ["ENGRANAJE"]
     assert controller._make_place_verify("ENGRANAJE", None)()
+
+
+def test_visual_pick_uses_measured_marker_height_and_keeps_pinch_limits(cell):
+    controller = Controller(cell, perception="vision")
+    controller._bin_row = {}
+    controller.spin(150)
+    status, points = controller._perceive_bin("bin-a-front", "ENGRANAJE")
+    assert status == "ok" and len(points) == 1
+    actual = cell.truth_body_pos("piece_bin-a-front_0")
+    assert abs(points[0][2] - actual[2]) < .002
+    assert controller.skills.pick_piece(points[0], None, pinch_band=(.007, .0155))
+    assert cell.truth_body_pos("piece_bin-a-front_0")[2] > actual[2] + .05

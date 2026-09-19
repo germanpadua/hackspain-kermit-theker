@@ -15,7 +15,7 @@ from . import skills as skills_mod
 from .perception import WristVision
 from .orders import compartment_bounds, compartment_for
 from .contracts import Phase
-from .scene import bin_origin
+from .scene import PART_MARKER_TOP_M, bin_origin
 from .sim import DOWN_X, CellSim
 from .skills import Skills, _quat_mat
 
@@ -97,8 +97,8 @@ class Controller:
         for s, p in sorted((h for h in hits if h[0] == sku),
                            key=lambda h: h[1][1]):
             p = np.asarray(p, float)
-            p[2] = bo[2] + 0.0105   # perceived z is the head top; the pick
-            units.append(p)          # needs the piece's base height
+            p[2] -= PART_MARKER_TOP_M
+            units.append(p)
         return st, units
 
     def _perceive_tray(self):
@@ -225,7 +225,7 @@ class Controller:
                     self.log("bin_seen_empty", bin=bin_id)
                     self.set_state(Phase.TOTE_DEPLETED)
                     break
-                name = sorted(names)[0]
+                name = min(names, key=lambda candidate: self.piece_pos_oracle(candidate)[1])
                 pos = self.piece_pos_oracle(name)
                 if not self.skills.pick_piece(pos, name):
                     self.log("pick_miss", piece=name, bin=bin_id)

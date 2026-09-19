@@ -26,6 +26,7 @@ SHELF_GRAY = (0.42, 0.47, 0.52, 1)
 BIN_COLORS = [(0.50, 0.50, 0.52, 1), (0.46, 0.46, 0.44, 1), (0.52, 0.50, 0.46, 1), (0.48, 0.46, 0.50, 1)]
 TRAY_COLOR = (0.58, 0.60, 0.62, 1)
 FLOOR_RGBA = (0.16, 0.19, 0.23, 1)
+PART_MARKER_TOP_M = 0.0356
 PARK_RGBA = (0.45, 0.40, 0.55, 1)
 TABLE_RGBA = (0.55, 0.42, 0.30, 1)
 QUAT_X_AXIS = [0.7071068, 0, 0.7071068, 0]  # +90 deg about Y: cylinder axis -> X
@@ -228,7 +229,7 @@ def add_piece(spec, sku_id, sku_info, name):
     # rendered from above (a marker flush with the head box is occluded by
     # the box's own faces)
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                  pos=[0, 0, base_h + post_h + head_h + 0.0008],
+                  pos=[0, 0, PART_MARKER_TOP_M - 0.0018],
                   size=[0.0165, 0.0018, 0],
                   contype=0, conaffinity=0, rgba=rgb)
     return body
