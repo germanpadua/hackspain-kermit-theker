@@ -80,7 +80,7 @@ class Controller:
         e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
         row = self._bin_row.get(bin_id, e["depth_row"])
         bo = bin_origin(self.sim.config, e["slot"], row)
-        tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
+        tgt = np.array([bo[0], bo[1] + 0.01, bo[2] + 0.33])
         self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
         half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
                 self.sim.config["bin"]["size_xyz_m"][1] / 2)
@@ -190,11 +190,12 @@ class Controller:
                 pos = units[0]
                 name = None     # the controller never sees piece names
                 # ~2cm pose error means the pinch can land on the head brim
-                # instead of the neck: fing width >0.0155 is a brim catch
+                # instead of the neck: fing width >0.0135 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.007, 0.0155)):
-                    self.log("pick_miss", piece="?", bin=bin_id)
+                                              pinch_band=(0.0045, 0.0135)):
+                    self.log("pick_miss", piece="?", bin=bin_id,
+                             why=self.skills.last_fail)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
                 # z-band, then the aimed spot must read empty

@@ -26,7 +26,7 @@ SHELF_GRAY = (0.42, 0.47, 0.52, 1)
 BIN_COLORS = [(0.50, 0.50, 0.52, 1), (0.46, 0.46, 0.44, 1), (0.52, 0.50, 0.46, 1), (0.48, 0.46, 0.50, 1)]
 TRAY_COLOR = (0.58, 0.60, 0.62, 1)
 FLOOR_RGBA = (0.16, 0.19, 0.23, 1)
-PART_MARKER_TOP_M = 0.0356
+PART_MARKER_TOP_M = 0.0426
 PARK_RGBA = (0.45, 0.40, 0.55, 1)
 TABLE_RGBA = (0.55, 0.42, 0.30, 1)
 QUAT_X_AXIS = [0.7071068, 0, 0.7071068, 0]  # +90 deg about Y: cylinder axis -> X
@@ -204,7 +204,7 @@ def add_piece(spec, sku_id, sku_info, name):
     friction = [1.6, 0.04, 0.004]
     rgb = list(sku_info["rgba"])
     r = sku_info["radius_m"] if "radius_m" in sku_info else sku_info["size_xy_m"][0] / 2
-    base_h = 0.008; post_h = 0.022; head_h = 0.003
+    base_h = 0.008; post_h = 0.022
     ib = r * 0.7071
     body.add_geom(name=f"{name}_g", type=mujoco.mjtGeom.mjGEOM_BOX,
                   size=[ib, ib, base_h / 2], pos=[0, 0, base_h / 2],
@@ -221,13 +221,15 @@ def add_piece(spec, sku_id, sku_info, name):
                   pos=[0, 0, base_h + post_h / 2],
                   size=[0.011, 0.0035, post_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+    # square head block: flat faces give the pads a stable 2-face clamp with
+    # 10 mm of contact height; the yawed diagonal (24*sqrt2 = 34 mm) still
+    # fits the open grip and reads inside the pinch band
+    head_knob_h = 0.010
     body.add_geom(name=f"{name}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
-                  pos=[0, 0, base_h + post_h + head_h / 2],
-                  size=[0.016, 0.016, head_h / 2],
+                  pos=[0, 0, base_h + post_h + head_knob_h / 2],
+                  size=[0.012, 0.012, head_knob_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
-    # marker cap: sits proud of the head box so the SKU hue is actually
-    # rendered from above (a marker flush with the head box is occluded by
-    # the box's own faces)
+    # marker cap: sits proud of the head knob so the SKU hue renders
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, 0, PART_MARKER_TOP_M - 0.0018],
                   size=[0.0165, 0.0018, 0],
