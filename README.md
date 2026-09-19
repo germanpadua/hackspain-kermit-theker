@@ -1,6 +1,82 @@
 # Almacén autónomo — mini demo HackSpain
 
+> **Nuevo: demo THEKER Robotics — preparación de pedido pieza a pieza.**
+> La sección [Demo THEKER](#demo-theker--preparación-de-pedido) describe la
+> nueva implementación (`orderpick/`); el resto del documento es el
+> prototipo anterior (`warehouse/`), conservado como referencia ejecutable.
+
 Prototipo de búsqueda, transporte y devolución de recipientes. **La retirada de material la confirma un operador.** No prepara pedidos completos de forma autónoma.
+
+---
+
+## Demo THEKER — preparación de pedido
+
+Brazo **Franka Emika Panda** (MuJoCo Menagerie, commit `8161bba`, assets
+vendorizados con licencia) con pinza paralela, montado sobre un **carro
+actuado en un carril** frente a una estantería de 3 slots. El carro lleva
+además la bandeja de pedido (3 compartimentos, labios de contención, asa
+tipo "sillín") y una **cámara de muñeca** calibrada (RGB-D).
+
+Ciclo sin intervención humana:
+
+1. Pedido `2×ENGRANAJE + 1×RODAMIENTO + 1×ESPARRAGO`.
+2. El carro se desplaza a cada slot (actuador, no teletransporte).
+3. Percepción: la cámara de muñeca renderizada segmenta los marcadores de
+   color de las piezas y retro-proyecta su posición con profundidad
+   métrica y extrínsecos de la cámara (`--perception vision`). El modo
+   `--perception oracle` lee la pose verdadera y está **etiquetado como
+   depuración**; nunca hay fallback silencioso de visión a ORACLE.
+4. Pinza física por contacto sobre el cuello de cada pieza; verificación
+   por encoder de pinza y por re-observación (la unidad objetivo debe
+   desaparecer del recipiente).
+5. Depósito en la bandeja a bordo, con compartimentos balanceados.
+6. Si el recipiente frontal queda vacío: se retira al aparcamiento de
+   vacíos (verificando antes que está libre) y se **adelanta la reserva**
+   físicamente enganchando el recipiente posterior.
+7. El carro lleva la bandeja a recepción (bandeja estable en el bolsillo);
+   se verifica que la mesa está libre, se recoge la bandeja por el asa
+   (soporte mecánico por compresión sobre las almohadillas) y se deposita.
+8. Verificación final del contenido por observación y por verdad de
+   simulación en el evaluador — un pedido parcial **no es un éxito**.
+
+```bash
+MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --seed 7 --perception vision --headless
+MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7:8 --modes oracle,vision --scenarios nominal
+```
+
+`--video` guarda frames de la cámara `overview` en `<run>/frames/`.
+Cada ejecución escribe `result.json` con el resultado, el contenido
+verificado y la lista completa de eventos.
+
+### Estado verificado
+
+Ejecutado en este repositorio (ver `runs/` y esta sección se actualiza):
+
+- Cadena completa física en modo oracle: pedido 4 piezas entregado en la
+  mesa, contenido exacto verificado (`tray_delivered`, `verified: True`).
+- Modo visión: observación de bins exacta en 3 seeds × 4 bins (SKU y
+  posición dentro de ~2,5 cm), agarres adaptados a la posición percibida,
+  re-observación tras cada intento y verificación de depósito por cámara.
+- Reserva: frontal vacío detectado por cámara (`bin_seen_empty`),
+  recipiente retirado al parking, reserva adelantada, pedido continuado.
+- Pendiente de cierre: la entrega exacta de las 4 unidades en modo visión
+  es intermitente (rebotes de depósito); los resultados completos están en
+  los `result.json` de cada ejecución.
+
+### Hipótesis y límites
+
+- Las piezas llevan marcadores de color declarados en la cabeza; la
+  percepción es por color+profundidad calibrada, **no** reconocimiento
+  general de productos.
+- La pose de la bandeja (equipamiento del carro) se lee de verdad: es
+  parte del utillaje calibrado, no percepción de producto.
+- `obs_glitch`/`obs_occluded` inyectan fotogramas corruptos/ausentes en la
+  cámara de muñeca; `grasp_slip` pulimenta la fricción del post de una
+  pieza; `park_blocked`/`reception_blocked` colocan un obstáculo magenta
+  físico sobre la superficie.
+- Sin ROS, servicios, LLM ni frontend; un proceso posee la simulación.
+
+---
 
 ## Qué está entregado
 

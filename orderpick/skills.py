@@ -166,9 +166,10 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0035, 0.0235)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
-        when the piece is held. Caller supplies the perceived piece position."""
+        when the piece is held. Caller supplies the perceived piece position;
+        `pinch_band` tightens the encoder acceptance (vision picks)."""
         pos = np.asarray(pos_xyz, float)
         gpz = pos[2] + PINCH_GP_OFFSET
         self.open(0.4)
@@ -178,7 +179,11 @@ class Skills:
         if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04, "grasp"):
             return False
         self.close(1.0)
-        if not self.pinched_something():
+        f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
+        if not (pinch_band[0] < f < pinch_band[1]):
+            self.open(0.4)  # release whatever was caught, then lift clear
+            self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
+                       DOWN_X, 0.05, "pick_reject_lift")
             return False
         # test lift: raise 5 cm; drop detection uses encoder + optional truth
         self.servo(self.sim.grasp_point() + np.array([0, 0, 0.05]),
@@ -205,15 +210,20 @@ class Skills:
         # the pocket mouth is a tight corridor: joint-space IK lands on a
         # branch that cannot descend into it — servo straight down instead
         self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.04, "pre")
-        # release low: fingertip tips sit ~4 cm above the tray floor at this
-        # height and clear the dividers/lips only in the drop cells, so the
-        # piece drops ~3 cm and cannot bounce over the rim lips
-        ok = self.servo(tp + np.array([0, 0, 0.055]), DOWN_X, 0.025, "release")
+        # carry-drop check: encoder reads open air if the piece slipped
+        # during the swing — abort before releasing into the walls
+        if float(np.mean(self.sim.data.qpos[self.sim.fing_qadr])) < 0.003:
+            self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
+                       DOWN_X, 0.03, "drop_abort")
+            return False
+        # release low: fingertips ~3 cm above the tray floor — the piece
+        # drops ~2 cm and cannot build bounce energy over the rim lips
+        ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.025, "release")
         if not ok:
             # one retry from a touch higher, then drop into the walls anyway
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.02, "relift")
-            ok = self.servo(tp + np.array([0, 0, 0.055]), DOWN_X, 0.02,
+            ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.02,
                             "release2")
         if not ok:
             self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.025, "aborted")

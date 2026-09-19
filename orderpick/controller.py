@@ -106,6 +106,7 @@ class Controller:
                          for b in bins}
         self._bin_row = {b: i for sku, (_x, bins) in slot_map.items()
                          for i, b in enumerate(bins)}
+        complete = True
         for sku, qty in order:
             slot_x, bins = slot_map[sku]
             need = qty
@@ -125,9 +126,11 @@ class Controller:
                     # reserve physically sits at the front row now
                     self._bin_row[bins[1]] = 0
             if need > 0:
+                # record the shortfall but still complete the other lines —
+                # a partial order is INCOMPLETE, not a success
                 self.log("order_shortfall", sku=sku, missing=need)
-                return False
-        return True
+                complete = False
+        return complete
 
     def _pick_units(self, bin_id, sku, want):
         got = 0
@@ -152,7 +155,11 @@ class Controller:
                     break
                 pos = units[0]
                 name = None     # the controller never sees piece names
-                if not self.skills.pick_piece(pos, None):
+                # ~2cm pose error means the pinch can land on the head brim
+                # instead of the neck: fing width >0.0155 is a brim catch
+                # (held but swings loose on the carry) — reject it
+                if not self.skills.pick_piece(pos, None,
+                                              pinch_band=(0.0045, 0.0155)):
                     self.log("pick_miss", piece="?", bin=bin_id)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
@@ -235,7 +242,7 @@ class Controller:
         tp = self.skills.tray_pocket()
         self.skills.servo(tp + np.array([0, 0, 0.40]), DOWN_X, 0.08,
                           "observe_rescue")
-        st, hits = self.vision.observe_region(tp[:2], (0.22, 0.20),
+        st, hits = self.vision.observe_region(tp[:2], (0.30, 0.28),
                                               floor_z=None, shrink=0.0)
         if st != "ok":
             return None, False
