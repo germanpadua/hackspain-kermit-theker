@@ -1,11 +1,16 @@
-# Almacén autónomo — mini demo HackSpain
+# THEKER — kits para montaje de reductores
 
-> **Nuevo: demo THEKER Robotics — preparación de pedido pieza a pieza.**
+> **Implementación principal: preparación y entrega de kits de componentes.**
 > La sección [Demo THEKER](#demo-theker--preparación-de-pedido) describe la
 > nueva implementación (`orderpick/`); el resto del documento es el
 > prototipo anterior (`warehouse/`), conservado como referencia ejecutable.
 
-Prototipo de búsqueda, transporte y devolución de recipientes. **La retirada de material la confirma un operador.** No prepara pedidos completos de forma autónoma.
+**Tarea humana elegida:** un operario consulta una orden, recorre el supermercado
+de componentes, cuenta referencias, prepara una bandeja, retira el recipiente
+agotado y entrega el kit al puesto de montaje de reductores industriales.
+`orderpick/` automatiza ese ciclo en simulación. **No ensambla el reductor.**
+El kit de demostración no es una lista de materiales de un producto comercial;
+la aplicación y el utillaje deben contrastarse con THEKER.
 
 ---
 
@@ -25,7 +30,9 @@ Ciclo sin intervención humana:
    color de las piezas y retro-proyecta su posición con profundidad
    métrica y extrínsecos de la cámara (`--perception vision`). El modo
    `--perception oracle` lee la pose verdadera y está **etiquetado como
-   depuración**; nunca hay fallback silencioso de visión a ORACLE.
+   depuración**. No hay fallback de localización de producto a ORACLE.
+   **Ambos modos siguen usando verdad para recipientes, bandeja y guard de
+   deslizamiento**: la percepción del modo visual es híbrida.
 4. Pinza física por contacto sobre el cuello de cada pieza; verificación
    por encoder de pinza y por re-observación (la unidad objetivo debe
    desaparecer del recipiente).
@@ -36,49 +43,132 @@ Ciclo sin intervención humana:
 7. El carro lleva la bandeja a recepción (bandeja estable en el bolsillo);
    se verifica que la mesa está libre, se recoge la bandeja por el asa
    (soporte mecánico por compresión sobre las almohadillas) y se deposita.
-8. Verificación final del contenido por observación y por verdad de
-   simulación en el evaluador — un pedido parcial **no es un éxito**.
+8. Evaluación independiente: contenido exacto por SKU, bandeja dentro de la
+   mesa, orientación, contacto de soporte, ausencia de contacto con pinza,
+   piezas apoyadas en la bandeja y estabilidad durante 0,5 s. Un pedido
+   parcial, con sobrantes o sostenido por la pinza **no es un éxito**.
+
+Una observación fuera de cámara o con profundidad ilegible queda `unknown`.
+El frontal solo se retira tras confirmar su vacío; agotar reintentos de agarre
+no confirma agotamiento de stock.
 
 ```bash
 MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --seed 7 --perception vision --headless
 MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7:8 --modes oracle,vision --scenarios nominal
+
+# Otra receta con el mismo catálogo, sin cambiar el controlador
+MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --headless --perception vision \
+  --recipe config/recipe-service.json
 ```
 
-`--video` guarda frames de la cámara `overview` en `<run>/frames/`.
-Cada ejecución escribe `result.json` con el resultado, el contenido
-verificado y la lista completa de eventos.
+En `orderpick.evaluate`, `7:8` incluye ambas semillas; los rangos del prototipo
+legacy tienen otra semántica. Un lote con cualquier entrega no exacta devuelve
+código 1, incluso si contiene escenarios de fallo intencionado.
 
-### Estado verificado
+`--recipe` acepta JSON con `id`, `workstation` y `lines: [{"sku": "...", "qty": 1}]`.
+Se rechazan referencias inexistentes, cantidades no enteras/positivas y líneas
+duplicadas. Cambiar la receta no aumenta el stock ni modifica la escena.
 
-Ejecutado en este repositorio (ver `runs/` y esta sección se actualiza):
+`--video` guarda una **secuencia PNG**, no vídeo codificado, de `overview`.
+`--run-dir` es la carpeta padre: siempre se crea una subcarpeta única.
+`metadata.json` identifica la receta, ayudas oraculares y hash de fuentes
+incluyendo `orderpick/`; `result.json` guarda comprobación física y eventos.
+Sin `--headless` se abre el visor nativo; no usar `MUJOCO_GL=egl` para ese modo.
 
-- Cadena completa física en modo oracle: pedido 4 piezas entregado en la
-  mesa, contenido exacto verificado (`tray_delivered`, `verified: True`).
-- Modo visión: observación de bins exacta en 3 seeds × 4 bins (SKU y
-  posición dentro de ~2,5 cm), agarres adaptados a la posición percibida,
-  re-observación tras cada intento y verificación de depósito por cámara.
-- Reserva: frontal vacío detectado por cámara (`bin_seen_empty`),
-  recipiente retirado al parking, reserva adelantada, pedido continuado.
-- Pendiente de cierre: la entrega exacta de las 4 unidades en modo visión
-  es intermitente (rebotes de depósito); los resultados completos están en
-  los `result.json` de cada ejecución.
+### Auditoría y medición
+
+Base auditada: `c60c429`, rama `devin/theker-order-picking`.
+Sus 39 tests pasaron, pero el benchmark nominal seed 7 entregó **0/1 pedidos
+exactos en oracle y 0/1 en visión** con su evaluador original. La afirmación
+anterior de una cadena física completa no se reprodujo en esa revisión.
+
+Localización RGB-D en los 3 bins frontales, semillas 7, 8 y 9 (9 observaciones,
+conteos correctos en ambas versiones):
+
+| Error XY | Base `c60c429` | Esta rama |
+|---|---:|---:|
+| Media | 16,739 mm | 2,946 mm |
+| Máximo | 20,787 mm | 7,044 mm |
+
+La media baja un 82,4 %. **Todavía no cumple el objetivo de máximo 5 mm**:
+la herramienta de calibración termina con código 1. Esto mide localización
+de piezas visibles, no fiabilidad del ciclo completo ni escenas ocluidas.
+
+```bash
+MUJOCO_GL=egl .venv/bin/python -m orderpick.calibrate --seeds 7 8 9
+```
+
+Para repetir la comparación, ejecutar el mismo script de calibración desde
+un checkout de `c60c429`, con `PYTHONPATH=.` y ruta absoluta al script de esta
+rama. Así se utilizan las clases del checkout base y la misma medición.
+
+Se reprodujeron cuatro fallos relevantes: región fuera de cámara declarada
+vacía, error visual de aproximadamente 20 mm en Y, descenso de la pinza
+contra las paredes de bandeja, y entrega declarada aunque la bandeja siguiera
+apoyada en la pinza. La localización ahora usa puntos RGB-D de la superficie
+superior; la descarga respeta la altura de pared y retira la pinza del asa.
+La validación física permanece más exigente que la señal `delivered` del
+controlador. Consultar `assessment` y `exact`, no solo esa señal.
+
+El benchmark conserva **todos** los episodios, incluidos fallos. Los cambios
+en verificación impiden comparar porcentajes antiguos y nuevos sin indicar
+qué criterio se utilizó. Una muestra pequeña tampoco demuestra fiabilidad
+industrial.
 
 ### Hipótesis y límites
 
 - Las piezas llevan marcadores de color declarados en la cabeza; la
   percepción es por color+profundidad calibrada, **no** reconocimiento
   general de productos.
-- La pose de la bandeja (equipamiento del carro) se lee de verdad: es
-  parte del utillaje calibrado, no percepción de producto.
+- Las bandas HSV están en `config/catalog.json`. Añadir una referencia
+  necesita calibración de su marcador, geometría y bin, no solo un nombre.
+- Las geometrías son peones con cuello y cabeza adaptados a la pinza, no
+  engranajes/rodamientos/espárragos industriales completos. Algunas superficies
+  son visuales; los contactos usan geometrías simplificadas. La masa efectiva
+  incluye geometrías auxiliares.
+- La variabilidad efectiva es jitter X hasta 18 mm, Y hasta 4 mm (puede ser
+  cero por las holguras del bin), yaw hasta 0,5 rad y masa nominal ±15 %.
+  No se ha implementado variación de tamaño ni deformación. Los umbrales de
+  visibilidad son heurísticos; no certifican ausencia de oclusiones pequeñas.
+- Recipientes, bandeja y monitor de deslizamiento usan poses oraculares.
+  La bandeja puede moverse y caer: no equivale a una pose fija calibrada.
 - `obs_glitch`/`obs_occluded` inyectan fotogramas corruptos/ausentes en la
   cámara de muñeca; `grasp_slip` pulimenta la fricción del post de una
   pieza; `park_blocked`/`reception_blocked` colocan un obstáculo magenta
   físico sobre la superficie.
 - Sin ROS, servicios, LLM ni frontend; un proceso posee la simulación.
+- No hay validación con hardware, reconocimiento general de piezas, planificación
+  general de colisiones ni recuperación tras reiniciar el proceso.
+
+### Prioridades siguientes para competir
+
+1. Medir repetibilidad del kit completo y el fallo físico dominante antes de
+   ampliar la escena. Publicar entregas exactas, parciales, caídas y tiempos.
+2. Sustituir las poses oraculares de logística por percepción de recipientes
+   y bandeja y sensores de agarre. Mantener la verdad solo en evaluación.
+3. Validar con THEKER la tarea humana, tiempos, BOM y utillaje; sustituir peones
+   por geometrías reales y medir holguras y variabilidad efectiva.
+4. Demostrar otra receta, una perturbación y una parada por observación
+   desconocida. Los fallos gestionados no se cuentan como pedidos entregados.
+5. Llevar al jurado una diapositiva con tarea, ciclo, métricas y límites; un
+   vídeo de respaldo no sustituye la ejecución en directo.
+
+### Verificación de desarrollo
+
+```bash
+MUJOCO_GL=egl .venv/bin/python -m pytest -q
+uv tool run --from ruff==0.12.12 ruff check --select E9,F63,F7,F82 \
+  orderpick tests/test_orderpick_regressions.py warehouse/persistence.py
+uv tool run --from mypy==1.17.1 mypy --ignore-missing-imports --follow-imports=silent \
+  orderpick/orders.py orderpick/verification.py
+```
+
+El chequeo de tipos cubre los nuevos módulos de recetas y verificación; no
+equivale a tipar todo el controlador ni las librerías nativas.
 
 ---
 
-## Qué está entregado
+## Prototipo legacy: qué está entregado
 
 Ciclo completo en **ORACLE + IDEALIZED**: reservar recipiente y hueco → aproximar → observar pose → alinear → acoplar y extraer → entregar y desacoplar en recepción → esperar confirmación → cambiar contenido visual → estimar nivel desde una imagen → generar alerta local → **volver a recoger en recepción** → devolver → verificar → liberar reserva.
 

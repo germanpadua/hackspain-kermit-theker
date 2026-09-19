@@ -1,11 +1,4 @@
-"""Manipulation skills: verified pick/place steps built on Motion primitives.
-
-Every skill returns a bool and leaves evidence via the sim state. Piece
-picks pinch the post just below the head (mechanical hold). The controller
-supplies estimated piece poses; the skills never read sim truth themselves —
-verification uses the piece's tracked lift (lift-height delta between the
-piece body and the grasp point is provided by the caller's estimate source).
-"""
+"""Contact manipulation with visual place callbacks and oracle logistics guards."""
 from __future__ import annotations
 
 import numpy as np
@@ -216,21 +209,18 @@ class Skills:
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.03, "drop_abort")
             return False
-        # release low: fingertips ~3 cm above the tray floor — the piece
-        # drops ~2 cm and cannot build bounce energy over the rim lips
-        ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.025, "release")
+        release_height = self.sim.config["tray"]["size_xyz_m"][2] + 0.04
+        ok = self.servo(tp + np.array([0, 0, release_height]), DOWN_X, 0.025, "release")
         if not ok:
             # one retry from a touch higher, then drop into the walls anyway
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.02, "relift")
-            ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.02,
+            ok = self.servo(tp + np.array([0, 0, release_height]), DOWN_X, 0.02,
                             "release2")
         if not ok:
             self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.025, "aborted")
         self.spin(35)  # let the pinched piece stop swinging before release
         self.open(0.6)
-        # fingers finish opening below the rim; lift a bit so a perched piece
-        # cannot hook a fingertip when the arm swings home
         self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
                    DOWN_X, 0.02, "postlift")
         if verify is not None:
@@ -243,7 +233,9 @@ class Skills:
         # (z >= ~0.10) or outside the footprint counts as a miss.
         for _ in range(10):
             self.spin(40)
-            rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
+            com = self.sim.data.xipos[self.sim.model.body(piece_name).id]
+            tq = _quat_mat(self.sim.truth_body_quat("tray"))
+            rel = tq.T @ (com - self.sim.truth_body_pos("tray"))
             if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075
                     and 0.0 < rel[2] < 0.095):
                 return True

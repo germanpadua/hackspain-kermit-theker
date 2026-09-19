@@ -373,7 +373,8 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
     pk = config["park"]
     world.add_geom(name="park_plate", type=mujoco.mjtGeom.mjGEOM_BOX,
                    pos=[pk["x_m"], pk["y_m"], pk["surface_z_m"] - 0.012],
-                   size=[0.13, 0.12, 0.012], rgba=list(PARK_RGBA))
+                   size=[pk["size_xy_m"][0] / 2, pk["size_xy_m"][1] / 2, 0.012],
+                   rgba=list(PARK_RGBA))
     world.add_geom(name="park_leg", type=mujoco.mjtGeom.mjGEOM_BOX,
                    pos=[pk["x_m"], pk["y_m"], pk["surface_z_m"] / 2 - 0.012],
                    size=[0.03, 0.03, pk["surface_z_m"] / 2 - 0.012], rgba=list(STEEL))

@@ -1,8 +1,4 @@
-"""MuJoCo adapter: the only object that owns MjModel/MjData.
-
-The controller receives Snapshot/Observation objects from this layer and from
-the perception layer; it never indexes qpos/xpos of world objects itself.
-"""
+"""Owner of MuJoCo state, proprioception, camera rendering and oracle adapters."""
 import numpy as np
 import mujoco
 
@@ -17,6 +13,8 @@ DOWN = np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], dtype=float)
 # Fingers point -X (along the rail), closing axis +Y, hand body held at +Y side.
 # Keeps the hand/wrist bulk outside the shelf footprint while fingers enter a bin.
 DOWN_X = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=float)
+SCENARIOS = ("nominal", "reserve_empty", "obs_glitch", "obs_occluded",
+             "park_blocked", "reception_blocked", "grasp_slip")
 
 
 def yaw_mat(theta):
@@ -26,6 +24,8 @@ def yaw_mat(theta):
 
 class CellSim:
     def __init__(self, seed=7, scenario="nominal"):
+        if scenario not in SCENARIOS:
+            raise ValueError(f"Unknown scenario: {scenario}")
         self.config = load_config("cell")
         self.catalog = load_config("catalog")
         self.seed = seed

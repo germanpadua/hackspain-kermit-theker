@@ -1,0 +1,8 @@
+{
+  "id": "REDUCTOR-SERVICIO-001",
+  "workstation": "Preparación de kit de mantenimiento del reductor",
+  "lines": [
+    {"sku": "ENGRANAJE", "qty": 1},
+    {"sku": "RODAMIENTO", "qty": 1}
+  ]
+}
