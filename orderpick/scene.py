@@ -215,15 +215,17 @@ def add_piece(spec, sku_id, sku_info, name):
                   pos=[0, 0, base_h + post_h / 2],
                   size=[0.011, 0.0035, post_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+    # square head block: flat faces give the pads a stable 2-face clamp with
+    # 10 mm of contact height; the yawed diagonal (24*sqrt2 = 34 mm) still
+    # fits the open grip and reads inside the pinch band
+    head_knob_h = 0.010
     body.add_geom(name=f"{name}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
-                  pos=[0, 0, base_h + post_h + head_h / 2],
-                  size=[0.016, 0.016, head_h / 2],
+                  pos=[0, 0, base_h + post_h + head_knob_h / 2],
+                  size=[0.012, 0.012, head_knob_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
-    # marker cap: sits proud of the head box so the SKU hue is actually
-    # rendered from above (a marker flush with the head box is occluded by
-    # the box's own faces)
+    # marker cap: sits proud of the head knob so the SKU hue renders
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                  pos=[0, 0, base_h + post_h + head_h + 0.0008],
+                  pos=[0, 0, base_h + post_h + head_knob_h + 0.0008],
                   size=[0.0165, 0.0018, 0],
                   contype=0, conaffinity=0, rgba=rgb)
     return body

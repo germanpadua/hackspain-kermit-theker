@@ -18,9 +18,11 @@ from .scene import tray_pocket_world
 from .sim import DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.019    # mid-neck: pads clamp the post while the fin tips
-                           # (x±11 mm) act as chocks — a pitch out of the
-                           # channel end digs the fin into the pad face
+PINCH_GP_OFFSET = 0.016    # low on the post: pads stay clear of the head's
+                           # bottom rim (z 0.030) so they clamp the 7 mm post
+                           # (~16 mm gap) — the 24 mm head above the pads is a
+                           # physical stop: it cannot pass the closed gap, so
+                           # a held piece can never slide out during lifts
 
 
 DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
@@ -42,6 +44,7 @@ class Skills:
         self.ik = IKSolver(sim)
         self.hold_guard = False   # abort active ops if the pinched object slips
         self.hold_ref = None      # |post_top - gp| at pinch time (drift sensor)
+        self.last_fail = ""       # why the last pick failed (for events)
         self.hold_post_local = np.array([0.0, 0.0, 0.140])
         self._dump_tick = 0
         self._dump_idx = 0
@@ -168,14 +171,20 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.007, 0.019)):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0045, 0.0135)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
         when the piece is held. Caller supplies the perceived piece position;
         `pinch_band` tightens the encoder acceptance (vision picks)."""
         pos = np.asarray(pos_xyz, float)
         gpz = pos[2] + PINCH_GP_OFFSET
         self.open(0.4)
+        # normalize the approach branch: after an observe pose the arm can be
+        # on a config that cannot descend straight into the tote — stowing
+        # first makes every pick start from the same reachable branch
+        self.motion.move_arm(STOW, duration_s=0.9, label="pre_pick")
+        self.run()
         if not self.hover_to(np.array([pos[0], pos[1], gpz + 0.20]), DOWN_X, [0, 0, 0]):
+            self.last_fail = "hover"
             return False
         self.servo([pos[0], pos[1], gpz + 0.10], DOWN_X, 0.12, "approach")
         if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04, "grasp"):
@@ -185,6 +194,7 @@ class Skills:
                        "grasp_backoff")
             if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04,
                               "grasp_retry"):
+                self.last_fail = "grasp_stall"
                 return False
         self.close(1.0)
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
@@ -192,6 +202,7 @@ class Skills:
             self.open(0.4)  # release whatever was caught, then lift clear
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
                        DOWN_X, 0.05, "pick_reject_lift")
+            self.last_fail = f"band:{f:.4f}"
             return False
         # test lift: raise 11 cm — the hanging piece's base must clear the
         # bin's front wall (65 mm) before any lateral move, otherwise it
@@ -202,7 +213,9 @@ class Skills:
         # post-lift drop check: pads on empty air = piece already gone
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
         if f < 0.003:
+            self.last_fail = f"lift_drop:{f:.4f}"
             return False
+        self.last_fail = ""
         return True
 
     def place_in_tray(self, piece_name=None, comp_xy=(-0.02, 0.05),

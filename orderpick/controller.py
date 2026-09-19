@@ -75,7 +75,7 @@ class Controller:
         e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
         row = self._bin_row.get(bin_id, e["depth_row"])
         bo = bin_origin(self.sim.config, e["slot"], row)
-        tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
+        tgt = np.array([bo[0], bo[1] + 0.01, bo[2] + 0.33])
         self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
         half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
                 self.sim.config["bin"]["size_xyz_m"][1] / 2)
@@ -92,7 +92,7 @@ class Controller:
         for s, p in sorted((h for h in hits if h[0] == sku),
                            key=lambda h: h[1][1]):
             p = np.asarray(p, float)
-            p[2] = bo[2] + 0.0105   # perceived z is the head top; the pick
+            p[2] = bo[2] + 0.005    # perceived xy is the head marker; the pick
             units.append(p)          # needs the piece's base height
         return st, units
 
@@ -168,8 +168,9 @@ class Controller:
                 # instead of the neck: fing width >0.0155 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.007, 0.0155)):
-                    self.log("pick_miss", piece="?", bin=bin_id)
+                                              pinch_band=(0.0045, 0.0135)):
+                    self.log("pick_miss", piece="?", bin=bin_id,
+                             why=self.skills.last_fail)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
                 # z-band, then the aimed spot must read empty
