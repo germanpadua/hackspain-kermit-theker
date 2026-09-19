@@ -52,16 +52,18 @@ verificado y la lista completa de eventos.
 
 Ejecutado en este repositorio (ver `runs/` y esta sección se actualiza):
 
-- Cadena completa física en modo oracle: pedido 4 piezas entregado en la
-  mesa, contenido exacto verificado (`tray_delivered`, `verified: True`).
-- Modo visión: observación de bins exacta en 3 seeds × 4 bins (SKU y
-  posición dentro de ~2,5 cm), agarres adaptados a la posición percibida,
-  re-observación tras cada intento y verificación de depósito por cámara.
-- Reserva: frontal vacío detectado por cámara (`bin_seen_empty`),
-  recipiente retirado al parking, reserva adelantada, pedido continuado.
-- Pendiente de cierre: la entrega exacta de las 4 unidades en modo visión
-  es intermitente (rebotes de depósito); los resultados completos están en
-  los `result.json` de cada ejecución.
+- **Modo visión, pedido completo entregado y verificado**: seed 7 —
+  `tray_delivered` con contenido exacto `{ENGRANAJE:2, RODAMIENTO:1,
+  ESPARRAGO:1}`, `verified: true` (se requirió la reserva: frontal vacío
+  detectado por cámara, recipiente retirado al parking, reserva
+  adelantada y pedido continuado).
+- Modo oracle: cadena completa física en seeds 7 y 12, entrega exacta
+  verificada.
+- La fiabilidad por semilla no es 100%: piezas que rebotan fuera de la
+  bandeja o se apoyan en el borde se re-observan y recapturan cuando es
+  posible; un corto plazo queda registrado como `order_shortfall`, nunca
+  como éxito. Las tasas exactas por semilla/escenario salen de
+  `orderpick.evaluate` (sección "Evaluación comparativa").
 
 ### Hipótesis y límites
 
