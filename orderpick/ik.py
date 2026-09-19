@@ -31,19 +31,30 @@ class IKSolver:
         r = point_world - d.xpos[hid]
         return (jp - skew(r) @ jr)[:, self.sim.arm_vadr], jr[:, self.sim.arm_vadr]
 
-    def solve(self, target_pos, target_mat, weight_rot=0.8, iters=350, lam=0.08):
+    def solve(self, target_pos, target_mat, weight_rot=0.8, iters=180, lam=0.08):
+        """Returns (q7, err). q7 is None when the pose is not reachable —
+        callers must treat None as 'do not move'."""
         m, d = self.sim.model, self.scratch
         d.qpos[:] = self.sim.data.qpos
         d.qvel[:] = 0
         mujoco.mj_forward(m, d)
         hid = self.sim.hand_id
         e_p = np.array([np.inf]); e_r = np.array([np.inf])
+        best = None; best_err = np.inf; stall = 0
         for _ in range(iters):
             mujoco.mj_kinematics(m, d)
             p = d.xpos[hid] + d.xmat[hid].reshape(3, 3) @ GRASP_OFFSET
             e_p = target_pos - p
             e_r = rot_err(d.xmat[hid].reshape(3, 3), target_mat)
-            if np.linalg.norm(e_p) < 3e-4 and np.linalg.norm(e_r) < 4e-3:
+            pe = float(np.linalg.norm(e_p))
+            if pe < best_err - 1e-5:
+                best_err = pe; stall = 0
+            else:
+                stall += 1
+                if stall > 25:
+                    break
+            if pe < 3e-4 and np.linalg.norm(e_r) < 4e-3:
+                best = d.qpos[self.sim.arm_qadr].copy()
                 break
             jp, jr = self._jacobian(d, p)
             J = np.vstack([jp, weight_rot * jr])
@@ -56,7 +67,9 @@ class IKSolver:
                                                 self.sim.arm_range[:, 0],
                                                 self.sim.arm_range[:, 1])
             mujoco.mj_forward(m, d)
-        return d.qpos[self.sim.arm_qadr].copy(), float(np.linalg.norm(e_p))
+        if best is None and best_err < 0.006 and np.linalg.norm(e_r) < 0.30:
+            best = d.qpos[self.sim.arm_qadr].copy()
+        return best, best_err
 
 
 def rms(a, b):

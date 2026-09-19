@@ -19,7 +19,7 @@
   },
   "arm_base_xyz_m": [
     -0.1,
-    -0.02,
+    0.08,
     0.42
   ],
   "tray_pocket_xyz_m": [
@@ -72,7 +72,7 @@
     "post_r_m": 0.005,
     "head_r_m": 0.013,
     "head_h_m": 0.005,
-    "handle_rise_m": 0.038,
+    "handle_rise_m": 0.075,
     "mass_kg": 0.5
   },
   "tray": {

@@ -73,23 +73,31 @@ def _walls(body, size_xyz, wall, height, rgba, prefix, open_front=False, lip_h=0
                       size=[x / 2, wall / 2, lip_h / 2], rgba=list(rgba))
 
 
-def _post_handle(body, spec_cfg, base_z, rim_z, y, rgba, prefix):
+def _post_handle(body, spec_cfg, base_z, rim_z, y, rgba, prefix, scale=1.0):
     """Mushroom pull handle: a thin post topped by a wider head disc.
 
     The gripper pinches the post just below the head; the head cannot pass
     between the pads, so lifting is mechanical rather than friction-only.
     """
     post_r = spec_cfg["post_r_m"]
-    head_r = spec_cfg["head_r_m"]
+    head_r = spec_cfg["head_r_m"] * scale
     head_h = spec_cfg["head_h_m"]
     top_z = rim_z + spec_cfg["handle_rise_m"]
     post_top = top_z - head_h
-    body.add_geom(name=f"{prefix}_post", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+    body.add_geom(name=f"{prefix}_post", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, y, (base_z + post_top) / 2],
-                  size=[post_r, (post_top - base_z) / 2, 0], rgba=list(rgba))
-    body.add_geom(name=f"{prefix}_head", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                  size=[post_r, post_r, (post_top - base_z) / 2], rgba=list(rgba))
+    body.add_geom(name=f"{prefix}_postvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                  pos=[0, y, (base_z + post_top) / 2],
+                  size=[post_r, (post_top - base_z) / 2, 0],
+                  contype=0, conaffinity=0, rgba=list(rgba))
+    body.add_geom(name=f"{prefix}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, y, post_top + head_h / 2],
-                  size=[head_r, head_h / 2, 0], rgba=list(rgba))
+                  size=[head_r, head_r, head_h / 2], rgba=list(rgba))
+    body.add_geom(name=f"{prefix}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                  pos=[0, y, post_top + head_h / 2],
+                  size=[head_r, head_h / 2, 0],
+                  contype=0, conaffinity=0, rgba=list(rgba))
 
 
 def add_bin(spec, config, entry, rgba):
@@ -102,6 +110,9 @@ def add_bin(spec, config, entry, rgba):
     # hangs over the shelf edge in free air while the fingers dive inside.
     _walls(body, size, b["wall_m"], size[2], rgba, entry["id"],
            open_front=True, lip_h=b["lip_h_m"])
+    # Pull post on the back wall top edge: mechanical lift + drag point.
+    _post_handle(body, b, size[2] - 0.012, size[2],
+                 size[1] / 2 - b["wall_m"] / 2, rgba, entry["id"], scale=1.15)
     body.add_geom(name=f"{entry['id']}_mass", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, 0.02], size=[0.05, 0.05, 0.02],
                   contype=0, conaffinity=0, mass=b["mass_kg"])
@@ -242,7 +253,7 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
         for side in (-1, 1):
             fbody.add_geom(name=f"{fname}_nub{side}",
                            type=mujoco.mjtGeom.mjGEOM_BOX,
-                           pos=[-0.012, 0.0055 + side * 0.008, 0.050],
+                           pos=[-0.0102, 0.0055 + side * 0.0072, 0.050],
                            size=[0.0028, 0.0016, 0.0032],
                            rgba=[0.15, 0.15, 0.16, 1],
                            friction=[2.0, 0.05, 0.005])
