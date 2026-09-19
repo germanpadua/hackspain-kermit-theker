@@ -31,11 +31,15 @@ class IKSolver:
         r = point_world - d.xpos[hid]
         return (jp - skew(r) @ jr)[:, self.sim.arm_vadr], jr[:, self.sim.arm_vadr]
 
-    def solve(self, target_pos, target_mat, weight_rot=0.8, iters=180, lam=0.08):
+    def solve(self, target_pos, target_mat, weight_rot=0.8, iters=180, lam=0.08,
+              seed_q=None):
         """Returns (q7, err). q7 is None when the pose is not reachable —
-        callers must treat None as 'do not move'."""
+        callers must treat None as 'do not move'. seed_q overrides the
+        start configuration (default: the live arm pose)."""
         m, d = self.sim.model, self.scratch
         d.qpos[:] = self.sim.data.qpos
+        if seed_q is not None:
+            d.qpos[self.sim.arm_qadr] = seed_q
         d.qvel[:] = 0
         mujoco.mj_forward(m, d)
         hid = self.sim.hand_id
@@ -70,6 +74,17 @@ class IKSolver:
         if best is None and best_err < 0.006 and np.linalg.norm(e_r) < 0.30:
             best = d.qpos[self.sim.arm_qadr].copy()
         return best, best_err
+
+    def solve_restarts(self, target_pos, target_mat, seeds=()):
+        """Try from the current pose, then from each seed config (HOME etc.)."""
+        q, err = self.solve(target_pos, target_mat)
+        if q is not None:
+            return q, err
+        for s in seeds:
+            q, err = self.solve(target_pos, target_mat, seed_q=s)
+            if q is not None:
+                return q, err
+        return None, err
 
 
 def rms(a, b):

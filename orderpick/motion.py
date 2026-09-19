@@ -31,18 +31,23 @@ class Motion:
 
     # ---- public commands -------------------------------------------------
     def drive_cart(self, x_target):
+        self.error = None
         self.op = _CartMove(self.sim, float(x_target))
 
-    def move_arm(self, q_target, duration_s=None, label=""):
+    def move_arm(self, q_target, duration_s=None, label="", speed_scale=1.0):
+        self.error = None
         self.op = _ArmMove(self.sim, np.asarray(q_target, dtype=float),
-                           duration_s, label)
+                           duration_s, label, speed_scale)
 
-    def servo_to(self, pos, mat, speed_m_s=0.10, label=""):
+    def servo_to(self, pos, mat, speed_m_s=0.10, label="", dq_clip=0.025):
         """Cartesian straight-line move of the grasp point (resolved-rate)."""
+        self.error = None
         self.op = _ArmServo(self.sim, np.asarray(pos, dtype=float),
-                            np.asarray(mat, dtype=float), speed_m_s, label)
+                            np.asarray(mat, dtype=float), speed_m_s, label,
+                            dq_clip)
 
     def grip(self, ctrl, duration_s=0.45, label=""):
+        self.error = None
         self.op = _GripMove(self.sim, float(ctrl), duration_s, label)
 
     def stow(self):
@@ -58,6 +63,9 @@ class Motion:
     # ---- per-tick advance -------------------------------------------------
     def tick(self, snapshot):
         if self.error:
+            # A latched error must release any queued op, not hold it forever —
+            # otherwise run() spins indefinitely on an op that never ticks.
+            self.op = None
             return
         if self.op is None:
             return
@@ -111,12 +119,12 @@ class _CartMove:
 
 
 class _ArmMove:
-    def __init__(self, sim, q_target, duration_s, label):
+    def __init__(self, sim, q_target, duration_s, label, speed_scale=1.0):
         self.sim = sim
         self.q_from = np.asarray(sim.data.qpos[sim.arm_qadr], dtype=float)
         self.q_target = np.asarray(q_target, dtype=float)
         span = float(np.max(np.abs(self.q_target - self.q_from)))
-        rate = sim.config["motion"]["joint_speed_rad_s"]
+        rate = sim.config["motion"]["joint_speed_rad_s"] * speed_scale
         self.dur = max(0.5, duration_s if duration_s else span / rate + 0.6)
         self.t0 = None
         self.label = label
@@ -152,17 +160,20 @@ class _ArmServo:
     """Resolved-rate Cartesian servo: the grasp point follows a straight line
     to the target, so the hand never sweeps through a wide joint-space arc."""
 
-    def __init__(self, sim, pos, mat, speed, label):
+    def __init__(self, sim, pos, mat, speed, label, dq_clip=0.025):
         self.sim = sim
         self.pos = pos
         self.mat = mat
         self.speed = speed
         self.label = label
+        self.dq_clip = dq_clip
         self.q_cmd = np.asarray(sim.data.qpos[sim.arm_qadr], dtype=float).copy()
         self.lam = 0.05
         self.stable = 0
         self.error = None
         self.t0 = None
+        self.best_dist = None
+        self.stall_t = None
 
     def tick(self, s):
         if self.t0 is None:
@@ -189,8 +200,9 @@ class _ArmServo:
         jr = jr[:, sim.arm_vadr]
         J = np.vstack([jp, wr * jr])
         dq = J.T @ np.linalg.solve(J @ J.T + self.lam**2 * np.eye(6), e6)
-        self.q_cmd = np.clip(self.q_cmd + np.clip(dq, -0.025, 0.025),
-                             sim.arm_range[:, 0], sim.arm_range[:, 1])
+        self.q_cmd = np.clip(
+            self.q_cmd + np.clip(dq, -self.dq_clip, self.dq_clip),
+            sim.arm_range[:, 0], sim.arm_range[:, 1])
         sim.command_arm(self.q_cmd)
         if dist < 0.004 and np.linalg.norm(e_r) < 0.06:
             self.stable += 1
@@ -198,6 +210,15 @@ class _ArmServo:
             self.stable = 0
         if self.stable >= sim.config["motion"]["settle_steps"]:
             return OpStatus.DONE
+        # stall detection: no distance progress for 3 s -> wedged or at a
+        # local minimum; bail so callers can react instead of timing out
+        if self.best_dist is None or dist < self.best_dist - 0.001:
+            self.best_dist = dist
+            self.stall_t = s.sim_time_s
+        if s.sim_time_s - self.stall_t > 3.0:
+            self.error = ("SERVO_STALL" if not self.label
+                          else f"SERVO_STALL:{self.label}")
+            return OpStatus.FAILED
         if s.sim_time_s - self.t0 > sim.config["motion"]["move_timeout_s"]:
             self.error = "SERVO_TIMEOUT" if not self.label else f"SERVO_TIMEOUT:{self.label}"
             return OpStatus.FAILED

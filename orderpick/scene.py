@@ -80,20 +80,85 @@ def _post_handle(body, spec_cfg, base_z, rim_z, y, rgba, prefix, scale=1.0):
     between the pads, so lifting is mechanical rather than friction-only.
     """
     post_r = spec_cfg["post_r_m"]
+    post_x = spec_cfg.get("post_x_m", post_r)
     head_r = spec_cfg["head_r_m"] * scale
     head_h = spec_cfg["head_h_m"]
     top_z = rim_z + spec_cfg["handle_rise_m"]
+    if spec_cfg.get("saddle_z_m"):
+        # saddle handle: the Panda's finger pads are staggered ~10mm apart
+        # along x, so friction pinches walk out of the open channel ends.
+        # Instead a horizontal bar RESTS ON the pads' top faces (the load is
+        # carried in compression), two prongs flank the pads' outer x edges
+        # (x cage), and a slim centre post is pinched for y location only.
+        sz = spec_cfg["saddle_z_m"]
+        post_top = sz - 0.009
+        body.add_geom(name=f"{prefix}_post", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, y, (base_z + post_top) / 2],
+                      size=[post_x, post_r, (post_top - base_z) / 2],
+                      friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+        body.add_geom(name=f"{prefix}_saddle", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, y, sz],
+                      size=[0.024, 0.011, 0.003],
+                      friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+        for sx in (-0.0225, 0.0225):
+            body.add_geom(name=f"{prefix}_prong{int(sx*1000)}",
+                          type=mujoco.mjtGeom.mjGEOM_BOX,
+                          pos=[sx, y, sz - 0.007],
+                          size=[0.002, 0.011, 0.004],
+                          friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+        # seat ribs: once seated, the closed pads' top faces sit between them
+        # — cages roll about x and y-slide off the pads' tops
+        for sy in (-0.014, 0.014):
+            body.add_geom(name=f"{prefix}_rib{int(sy*1000)}",
+                          type=mujoco.mjtGeom.mjGEOM_BOX,
+                          pos=[0, y + sy, sz - 0.0045],
+                          size=[0.024, 0.002, 0.0025],
+                          friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+        return
     post_top = top_z - head_h
     body.add_geom(name=f"{prefix}_post", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, y, (base_z + post_top) / 2],
-                  size=[post_r, post_r, (post_top - base_z) / 2], rgba=list(rgba))
+                  size=[post_x, post_r, (post_top - base_z) / 2],
+                  friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+    if spec_cfg.get("post_fin_x_m"):
+        # short fin stub confined to the pinch band (top ~21mm of the post):
+        # its +-x end faces jam against the pads' outer faces so a pinched
+        # post cannot translate out the open end of the finger channel —
+        # unlike a full-height fin it stays inside the pads when the post
+        # pitches
+        fx = spec_cfg["post_fin_x_m"]
+        body.add_geom(name=f"{prefix}_fin", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, y, post_top - 0.011],
+                      size=[fx, post_r * 0.5, 0.010],
+                      friction=[2.2, 0.05, 0.005], rgba=list(rgba))
     body.add_geom(name=f"{prefix}_postvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, y, (base_z + post_top) / 2],
                   size=[post_r, (post_top - base_z) / 2, 0],
                   contype=0, conaffinity=0, rgba=list(rgba))
+    if spec_cfg.get("collar_z_m"):
+        # pinch collar below the head: the post is then boxed in — head roof
+        # above the pads, collar floor below — bounce cannot unseat the pinch
+        cz = spec_cfg["collar_z_m"]
+        body.add_geom(name=f"{prefix}_collar", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, y, cz],
+                      size=[0.016, 0.016, 0.004],
+                      friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+    if spec_cfg.get("wing_z_m"):
+        # thin flange just under the pinch band, reaching past the post into
+        # the closed pads' footprint in y: a post pitching about the pinch
+        # axis swings the wing's +-x edges up into the pad bottoms, caging
+        # the tilt before the post can pop out of the channel
+        wz = spec_cfg["wing_z_m"]
+        wy = spec_cfg["wing_y_m"]
+        body.add_geom(name=f"{prefix}_wing", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, y, wz],
+                      size=[0.008, wy, 0.0015],
+                      friction=[2.2, 0.05, 0.005], rgba=list(rgba))
+    head_y = spec_cfg.get("head_y_m", head_r)
     body.add_geom(name=f"{prefix}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, y, post_top + head_h / 2],
-                  size=[head_r, head_r, head_h / 2], rgba=list(rgba))
+                  size=[head_r, head_y, head_h / 2],
+                  friction=[2.2, 0.05, 0.005], rgba=list(rgba))
     body.add_geom(name=f"{prefix}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, y, post_top + head_h / 2],
                   size=[head_r, head_h / 2, 0],
@@ -145,13 +210,17 @@ def add_piece(spec, sku_id, sku_info, name):
                   pos=[0, 0, base_h + post_h / 2],
                   size=[0.007, 0.007, post_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+    body.add_geom(name=f"{name}_fin", type=mujoco.mjtGeom.mjGEOM_BOX,
+                  pos=[0, 0, base_h + post_h / 2],
+                  size=[0.011, 0.0035, post_h / 2],
+                  friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
     body.add_geom(name=f"{name}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, base_h + post_h + head_h / 2],
-                  size=[0.008, 0.008, head_h / 2],
+                  size=[0.016, 0.016, head_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, 0, base_h + post_h + head_h / 2],
-                  size=[0.008, head_h / 2, 0],
+                  size=[0.016, head_h / 2, 0],
                   contype=0, conaffinity=0, rgba=[0.25, 0.25, 0.27, 1])
     return body
 
@@ -160,8 +229,10 @@ def add_tray(spec, config, cart_body):
     t = config["tray"]
     size = t["size_xyz_m"]
     px, py, pz = config["tray_pocket_xyz_m"]
-    lip = 0.010
-    gap = 0.008  # clearance so the tray only touches lips under lateral load
+    # full-height lips keep the tray seated; the wider gap leaves a few
+    # degrees of tilt before a slightly canted tray wedges on lift-out
+    lip = size[2] + 0.005
+    gap = 0.005
     for side in (-1, 1):
         cart_body.add_geom(name=f"pocket_x{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
                            pos=[px + side * (size[0] / 2 + gap + lip / 2), py, pz + lip / 2],

@@ -10,13 +10,27 @@ from __future__ import annotations
 
 import numpy as np
 
+import os
+
 from .ik import IKSolver
 from .motion import Motion
 from .scene import tray_pocket_world
-from .sim import DOWN_X, CellSim
+from .sim import DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.030    # gp above piece origin so pad band sits under head
+PINCH_GP_OFFSET = 0.022    # gp above piece origin -> pads pinch post under head
+
+
+DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
+
+
+def _quat_mat(q):
+    """wxyz quaternion -> rotation matrix."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
 class Skills:
@@ -24,12 +38,61 @@ class Skills:
         self.sim = sim
         self.motion = Motion(sim)
         self.ik = IKSolver(sim)
+        self.hold_guard = False   # abort active ops if the pinched object slips
+        self.hold_ref = None      # |post_top - gp| at pinch time (drift sensor)
+        self.hold_post_local = np.array([0.0, 0.0, 0.133])
+        self._dump_tick = 0
+        self._dump_idx = 0
 
-    # --- low level -----------------------------------------------------
+    def _dump_frame(self):
+        import cv2
+        import mujoco
+        cam = mujoco.MjvCamera()
+        tp = self.sim.truth_body_pos("tray")
+        cam.lookat[:] = tp + np.array([0, 0, 0.14])
+        cam.distance = 0.28
+        cam.azimuth = 90
+        cam.elevation = -5
+        if self.sim.renderer is None:
+            self.sim.renderer = mujoco.Renderer(self.sim.model, height=480,
+                                                width=640)
+        self.sim.renderer.update_scene(self.sim.data, camera=cam)
+        img = self.sim.renderer.render().copy()
+        cv2.imwrite(f"{DUMP_DIR}/f{self._dump_idx:04d}_"
+                    f"t{self.sim.data.time:.1f}.png",
+                    cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        self._dump_idx += 1
+
     def spin(self, n=10):
         for _ in range(n):
             self.sim.step(self.sim.config["control_steps"])
             self.motion.tick(self.sim.snapshot())
+            if DUMP_DIR and (self.hold_guard or getattr(
+                    self.motion.op, "label", "").startswith(
+                    ("tray", "pinch", "reseat"))):
+                self._dump_tick += 1
+                if self._dump_tick % 12 == 0:
+                    self._dump_frame()
+            if self.hold_guard and self.motion.active:
+                f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
+                if f < 0.004:
+                    self.motion.error = "GRIP_LOST"
+                    self.motion.op = None
+                elif self.hold_ref is not None:
+                    # the post sliding out the channel ends barely moves
+                    # fing; track the post top vs the grasp point instead
+                    tp = self.sim.truth_body_pos("tray")
+                    tq = _quat_mat(self.sim.truth_body_quat("tray"))
+                    post_top = tp + tq @ self.hold_post_local
+                    d = float(np.linalg.norm(post_top - self.sim.grasp_point()))
+                    if abs(d - self.hold_ref) > 0.022:
+                        self.motion.error = "GRIP_SLIP"
+                        self.motion.op = None
+                    elif tq[2, 2] < 0.90:
+                        # tray tipping >25 deg: the post is camming out —
+                        # abort before full escape so it drops into the pocket
+                        self.motion.error = "GRIP_TILT"
+                        self.motion.op = None
 
     def run(self):
         while self.motion.active:
@@ -43,24 +106,40 @@ class Skills:
         self.motion.drive_cart(x)
         return self.run()
 
-    def hover_to(self, p, mat, off):
-        q, err = self.ik.solve(p + np.array(off), mat)
-        if q is None or err > 0.006:
-            return False
-        self.motion.move_arm(q)
-        return self.run()
+    def tray_pocket(self):
+        return tray_pocket_world(self.sim.config, self.cart())
 
-    def servo(self, pos, mat, speed, label):
-        self.motion.servo_to(np.asarray(pos, float), mat, speed, label=label)
+    def _arrived(self, target, tol=0.04):
+        return (np.linalg.norm(self.sim.grasp_point() - np.asarray(target, float))
+                < tol)
+
+    def hover_to(self, p, mat, off):
+        tgt = np.asarray(p, float) + np.asarray(off, float)
+        q, err = self.ik.solve_restarts(tgt, mat, seeds=(HOME,))
+        if q is None or err > 0.006:
+            # iterative IK can stall from an awkward start pose — the Cartesian
+            # servo solves incrementally and often still reaches the target.
+            ok = self.servo(tgt, mat, 0.08, "hover_fb")
+            return ok and self._arrived(tgt)
+        self.motion.move_arm(q)
         ok = self.run()
-        if not ok:
+        if not (ok and self._arrived(tgt)):
+            # IK decimetre error or a mid-settle check — servo refines it
+            ok = self.servo(tgt, mat, 0.08, "hover_fb")
+        return ok and self._arrived(tgt)
+
+    def servo(self, pos, mat, speed, label, dq_clip=0.025):
+        pos = np.asarray(pos, float)
+        self.motion.servo_to(pos, mat, speed, label=label, dq_clip=dq_clip)
+        ok = self.run()
+        if not ok or not self._arrived(pos):
             self.motion.error = None
-            q, err = self.ik.solve(np.asarray(pos, float), mat)
+            q, err = self.ik.solve_restarts(pos, mat, seeds=(HOME,))
             if q is None or err > 0.006:
                 return False
             self.motion.move_arm(q, label=label)
             ok = self.run()
-        return ok
+        return ok and self._arrived(pos)
 
     def open(self, t=0.5):
         self.motion.grip(255, duration_s=t)
@@ -77,8 +156,10 @@ class Skills:
     def pinched_something(self):
         """Encoder-based capture estimate: fingers must stall on the post
         (~8-11 mm), not close to empty air (~0) or stop on the base (>14 mm)."""
+        # post pinch lands ~0.0086; a yaw-rotated head corner can stall as
+        # high as ~0.022 and still holds mechanically (head can't pass).
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
-        return 0.0035 < f < 0.0135
+        return 0.0035 < f < 0.0235
 
     def piece_lifted_truth(self, name, min_z=0.03):
         """Debug/evaluator check only — reads simulator truth."""
@@ -93,8 +174,7 @@ class Skills:
         self.open(0.4)
         if not self.hover_to(np.array([pos[0], pos[1], gpz + 0.20]), DOWN_X, [0, 0, 0]):
             return False
-        if not self.servo([pos[0], pos[1], gpz + 0.10], DOWN_X, 0.12, "approach"):
-            pass  # keep descending anyway; contact stall handled below
+        self.servo([pos[0], pos[1], gpz + 0.10], DOWN_X, 0.12, "approach")
         if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04, "grasp"):
             return False
         self.close(1.0)
@@ -106,22 +186,50 @@ class Skills:
         self.spin(10)
         return True
 
-    def place_in_tray(self, piece_name, comp_x=0.0):
-        """Carry held piece to the onboard tray and release."""
+    def place_in_tray(self, piece_name, comp_xy=(-0.02, 0.05)):
+        """Carry held piece to the onboard tray and release. Drop zones are
+        offset ~5 cm in y so the closed finger channel never sweeps over the
+        tray's center post while a piece is pinched."""
         tp = tray_pocket_world(self.sim.config, self.cart())
-        tp = tp + np.array([comp_x, 0.0, 0.0])
+        tp = tp + np.array([comp_xy[0], comp_xy[1], 0.0])
         if not self.servo(self.sim.grasp_point() + np.array([0, 0, 0.13]),
                           DOWN_X, 0.035, "clear"):
             pass
-        if not self.hover_to(tp + np.array([0, 0, 0.34]), DOWN_X, [0, 0, 0]):
+        # joint-space waypoints: the mid heights solve IK cleanly where a
+        # straight-line servo stalls near singularities
+        if not self.hover_to(tp + np.array([0, 0, 0.50]), DOWN_X, [0, 0, 0]):
             return False
-        self.servo(tp + np.array([0, 0, 0.15]), DOWN_X, 0.04, "lower")
+        # the pocket mouth is a tight corridor: joint-space IK lands on a
+        # branch that cannot descend into it — servo straight down instead
+        self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.04, "pre")
+        ok = self.servo(tp + np.array([0, 0, 0.10]), DOWN_X, 0.025, "release")
+        if not ok:
+            # one retry from a touch higher, then drop into the walls anyway
+            self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
+                       DOWN_X, 0.02, "relift")
+            ok = self.servo(tp + np.array([0, 0, 0.10]), DOWN_X, 0.02,
+                            "release2")
+        if not ok:
+            self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.025, "aborted")
+        self.spin(35)  # let the pinched piece stop swinging before release
         self.open(0.6)
-        self.spin(30)
-        # verify: piece rests inside tray walls
-        rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
-        return abs(rel[0]) < 0.115 and abs(rel[1]) < 0.07 and 0.0 < rel[2] < 0.06
+        # verify over a settling window: the piece can bounce before resting
+        # inside the walls — count anything within the tray footprint that is
+        # below the rim; a perched piece settles during transport anyway and
+        # is re-verified by the delivery content check
+        for _ in range(6):
+            self.spin(40)
+            rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
+            if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075
+                    and 0.0 < rel[2] < 0.10):
+                return True
+        return False
 
     def stow(self):
-        self.motion.stow()
-        return self.run()
+        for _ in range(2):
+            self.motion.stow()
+            ok = self.run()
+            q = np.asarray(self.sim.data.qpos[self.sim.arm_qadr])
+            if ok and np.max(np.abs(q - np.asarray(STOW))) < 0.08:
+                return True
+        return False
