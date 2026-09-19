@@ -40,7 +40,7 @@ class Skills:
         self.ik = IKSolver(sim)
         self.hold_guard = False   # abort active ops if the pinched object slips
         self.hold_ref = None      # |post_top - gp| at pinch time (drift sensor)
-        self.hold_post_local = np.array([0.0, 0.0, 0.133])
+        self.hold_post_local = np.array([0.0, 0.0, 0.140])
         self._dump_tick = 0
         self._dump_idx = 0
 
@@ -186,10 +186,13 @@ class Skills:
         self.spin(10)
         return True
 
-    def place_in_tray(self, piece_name, comp_xy=(-0.02, 0.05)):
+    def place_in_tray(self, piece_name=None, comp_xy=(-0.02, 0.05),
+                      verify=None):
         """Carry held piece to the onboard tray and release. Drop zones are
         offset ~5 cm in y so the closed finger channel never sweeps over the
-        tray's center post while a piece is pinched."""
+        tray's center post while a piece is pinched. `verify` (if given) is
+        a callable evaluated after settling — used for vision-mode checks;
+        without it, truth pose is used (oracle/debug only)."""
         tp = tray_pocket_world(self.sim.config, self.cart())
         tp = tp + np.array([comp_xy[0], comp_xy[1], 0.0])
         if not self.servo(self.sim.grasp_point() + np.array([0, 0, 0.13]),
@@ -202,26 +205,37 @@ class Skills:
         # the pocket mouth is a tight corridor: joint-space IK lands on a
         # branch that cannot descend into it — servo straight down instead
         self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.04, "pre")
-        ok = self.servo(tp + np.array([0, 0, 0.10]), DOWN_X, 0.025, "release")
+        # release low: fingertip tips sit ~4 cm above the tray floor at this
+        # height and clear the dividers/lips only in the drop cells, so the
+        # piece drops ~3 cm and cannot bounce over the rim lips
+        ok = self.servo(tp + np.array([0, 0, 0.055]), DOWN_X, 0.025, "release")
         if not ok:
             # one retry from a touch higher, then drop into the walls anyway
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.02, "relift")
-            ok = self.servo(tp + np.array([0, 0, 0.10]), DOWN_X, 0.02,
+            ok = self.servo(tp + np.array([0, 0, 0.055]), DOWN_X, 0.02,
                             "release2")
         if not ok:
             self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.025, "aborted")
         self.spin(35)  # let the pinched piece stop swinging before release
         self.open(0.6)
-        # verify over a settling window: the piece can bounce before resting
-        # inside the walls — count anything within the tray footprint that is
-        # below the rim; a perched piece settles during transport anyway and
-        # is re-verified by the delivery content check
-        for _ in range(6):
+        # fingers finish opening below the rim; lift a bit so a perched piece
+        # cannot hook a fingertip when the arm swings home
+        self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
+                   DOWN_X, 0.02, "postlift")
+        if verify is not None:
+            for _ in range(6):
+                self.spin(40)
+            return bool(verify())
+        # verify over a settling window: a piece inside the tray footprint
+        # below the rim-lip band is contained during transport — perched on
+        # a divider is fine (the lips keep it in). Perched ON the lip itself
+        # (z >= ~0.10) or outside the footprint counts as a miss.
+        for _ in range(10):
             self.spin(40)
             rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
             if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075
-                    and 0.0 < rel[2] < 0.10):
+                    and 0.0 < rel[2] < 0.095):
                 return True
         return False
 

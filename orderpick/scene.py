@@ -21,7 +21,7 @@ PANDA_XML = ROOT / "assets" / "menagerie" / "franka_emika_panda" / "panda.xml"
 
 STEEL = (0.38, 0.43, 0.50, 1)
 SHELF_GRAY = (0.42, 0.47, 0.52, 1)
-BIN_COLORS = [(0.25, 0.50, 0.62, 1), (0.32, 0.55, 0.40, 1), (0.55, 0.45, 0.28, 1), (0.50, 0.40, 0.55, 1)]
+BIN_COLORS = [(0.50, 0.50, 0.52, 1), (0.46, 0.46, 0.44, 1), (0.52, 0.50, 0.46, 1), (0.48, 0.46, 0.50, 1)]
 TRAY_COLOR = (0.72, 0.62, 0.20, 1)
 FLOOR_RGBA = (0.16, 0.19, 0.23, 1)
 PARK_RGBA = (0.45, 0.40, 0.55, 1)
@@ -221,7 +221,7 @@ def add_piece(spec, sku_id, sku_info, name):
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, 0, base_h + post_h + head_h / 2],
                   size=[0.016, head_h / 2, 0],
-                  contype=0, conaffinity=0, rgba=[0.25, 0.25, 0.27, 1])
+                  contype=0, conaffinity=0, rgba=rgb)
     return body
 
 
@@ -243,6 +243,22 @@ def add_tray(spec, config, cart_body):
     tray = spec.worldbody.add_body(name="tray", pos=[0, 0, 0])
     tray.add_freejoint(name="tray_free")
     _walls(tray, size, t["wall_m"], size[2], TRAY_COLOR, "tray")
+    # inward rim lip: a resting piece cannot tip out during cart transport —
+    # escaping now requires being perched near rim height first, which the
+    # place verifier rejects and retries
+    w = t["wall_m"]
+    lip_in = 0.009
+    for side in (-1, 1):
+        tray.add_geom(name=f"tray_lipx{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[side * (size[0] / 2 - w - lip_in / 2), 0,
+                           size[2] - 0.003],
+                      size=[lip_in / 2, size[1] / 2 - w, 0.003],
+                      rgba=list(TRAY_COLOR))
+        tray.add_geom(name=f"tray_lipy{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, side * (size[1] / 2 - w - lip_in / 2),
+                           size[2] - 0.003],
+                      size=[size[0] / 2 - w, lip_in / 2, 0.003],
+                      rgba=list(TRAY_COLOR))
     n = t["compartments"]
     inner = size[0] - 2 * t["wall_m"]
     for i in range(1, n):

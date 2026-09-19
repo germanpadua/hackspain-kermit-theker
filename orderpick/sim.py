@@ -183,7 +183,8 @@ class CellSim:
                                        self.config["cameras"]["overview_h"])
         if depth:
             if self.renderer_depth is None:
-                self.renderer_depth = mujoco.Renderer(self.model, height=h, width=w)
+                self.renderer_depth = mujoco.Renderer(
+                    self.model, height=max(h, 360), width=max(w, 640))
                 self.renderer_depth.enable_depth_rendering()
             self.renderer_depth.update_scene(self.data, camera=camera)
             return self.renderer_depth.render().copy()

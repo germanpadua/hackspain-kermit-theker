@@ -14,6 +14,7 @@ import numpy as np
 
 from .ik import IKSolver
 from .motion import Motion
+from .perception import WristVision
 from .scene import bin_origin, piece_name, tray_pocket_world
 from .sim import DOWN, DOWN_X, CellSim
 from .skills import Skills, _quat_mat
@@ -29,13 +30,17 @@ TRAY_POST_GP_Z = 0.1295
 
 
 class Controller:
-    def __init__(self, sim: CellSim, rng=None):
+    def __init__(self, sim: CellSim, rng=None, perception="oracle"):
         self.sim = sim
         self.skills = Skills(sim)
         self.motion = self.skills.motion
         self.events = []
         self.max_retries = 2
         self._placed = []         # tray drop cells used — load balancing
+        if perception not in ("oracle", "vision"):
+            raise ValueError(f"unknown perception mode {perception!r}")
+        self.perception = perception
+        self.vision = WristVision(sim) if perception == "vision" else None
 
     def log(self, kind, **kw):
         self.events.append({"t": round(self.sim.data.time, 3), "kind": kind, **kw})
@@ -56,6 +61,34 @@ class Controller:
     def bin_pos_oracle(self, bin_id):
         adr = self.sim.bin_qadr[bin_id]
         return self.sim.data.qpos[adr:adr + 3].copy()
+
+    # ---------- vision: rendered wrist camera, calibrated ----------
+    def _perceive_bin(self, bin_id, sku):
+        """Servo the wrist camera above the bin and observe. Returns
+        (status, [(pos,)]): 'ok'/'empty'/'unknown'; poses are ordered
+        front-most first. The controller never sees piece names — only
+        perceived positions of the expected SKU."""
+        e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
+        bo = bin_origin(self.sim.config, e["slot"], e["depth_row"])
+        tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
+        self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
+        half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
+                self.sim.config["bin"]["size_xyz_m"][1] / 2)
+        st, hits = self.vision.observe_bin(bin_id, bo[:2], half,
+                                           floor_z=bo[2])
+        units = sorted((np.asarray(p) for s, p in hits if s == sku),
+                       key=lambda p: p[1])
+        return st, units
+
+    def _perceive_tray(self):
+        """Observe the onboard tray from above; returns (status, units)
+        where units are world positions inside the tray floor band."""
+        tp = self.skills.tray_pocket()
+        self.skills.servo(tp + np.array([0, 0, 0.36]), DOWN_X, 0.08,
+                          "observe_tray")
+        st, hits = self.vision.observe_region(
+            tp[:2], (0.115, 0.075), floor_z=tp[2], shrink=0.02, z_band=0.095)
+        return st, hits
 
     # ---------- top level ----------
     def fulfill(self, order, slot_map):
@@ -88,36 +121,66 @@ class Controller:
     def _pick_units(self, bin_id, sku, want):
         got = 0
         tries = 0
+        pending = []            # vision: perceived unit positions not yet tried
+        obs_retries = 0
         while got < want and tries < want * (self.max_retries + 1):
             tries += 1
-            # perceived units: oracle returns the remaining pieces in the bin
-            names = [n for n in self.sim.piece_qadr
-                     if self.sim.piece_bin.get(n) == bin_id
-                     and self._piece_in_bin(n, bin_id)]
-            if not names:
-                break
-            name = sorted(names)[0]
-            pos = self.piece_pos_oracle(name)
-            if not self.skills.pick_piece(pos, name):
-                self.log("pick_miss", piece=name, bin=bin_id)
-                continue
+            if self.perception == "vision":
+                if not pending:
+                    st, pending = self._perceive_bin(bin_id, sku)
+                    if st == "unknown":
+                        self.log("obs_invalid", bin=bin_id)
+                        obs_retries += 1
+                        if obs_retries > 1:
+                            self.log("bin_unreadable", bin=bin_id)
+                            break
+                        st, pending = self._perceive_bin(bin_id, sku)
+                        if st == "unknown":
+                            self.log("bin_unreadable", bin=bin_id)
+                            break
+                    if st == "empty" or not pending:
+                        self.log("bin_seen_empty", bin=bin_id)
+                        break
+                pos = pending.pop(0)
+                name = None     # the controller never sees piece names
+                if not self.skills.pick_piece(pos, None):
+                    self.log("pick_miss", piece="?", bin=bin_id)
+                    continue
+            else:
+                # perceived units: oracle returns the remaining pieces
+                names = [n for n in self.sim.piece_qadr
+                         if self.sim.piece_bin.get(n) == bin_id
+                         and self._piece_in_bin(n, bin_id)]
+                if not names:
+                    break
+                name = sorted(names)[0]
+                pos = self.piece_pos_oracle(name)
+                if not self.skills.pick_piece(pos, name):
+                    self.log("pick_miss", piece=name, bin=bin_id)
+                    continue
             # drop at outer-compartment centres (x +-0.079, dividers at
             # +-0.040) with +-0.032 y offset (finger pads stay clear of the
             # pocket lips); the side is chosen to keep the tray's x-moment
             # ~0 — an unbalanced load torques the post out of the pinch
-            comp = self._next_comp()
-            if not self.skills.place_in_tray(name, comp_xy=comp):
+            comp = self._next_comp(tall=(sku == "ESPARRAGO"))
+            verify = self._make_tray_verify() if self.vision else None
+            if not self.skills.place_in_tray(name, comp_xy=comp,
+                                             verify=verify):
                 self.log("place_miss", piece=name, bin=bin_id)
                 # rescue: re-observe the piece where it actually landed and
                 # re-pick it — recoverable only while it rests near tray top
-                p2 = self.piece_pos_oracle(name)
-                tp = self.skills.tray_pocket()
-                near_tray = (abs(p2[0] - tp[0]) < 0.20
-                             and abs(p2[1] - tp[1]) < 0.15
-                             and p2[2] > tp[2])
+                if self.vision:
+                    p2, near_tray = self._rescue_spot()
+                else:
+                    p2 = self.piece_pos_oracle(name)
+                    tp = self.skills.tray_pocket()
+                    near_tray = (abs(p2[0] - tp[0]) < 0.22
+                                 and abs(p2[1] - tp[1]) < 0.20
+                                 and p2[2] > tp[2] - 0.01)
                 if near_tray and self.skills.pick_piece(p2, name):
+                    v2 = self._make_tray_verify() if self.vision else None
                     if self.skills.place_in_tray(
-                            name, comp_xy=(comp[0], -comp[1])):
+                            name, comp_xy=(comp[0], -comp[1]), verify=v2):
                         self._placed.append((comp[0], -comp[1]))
                         got += 1
                         self.log("unit_picked", piece=name, bin=bin_id,
@@ -132,13 +195,46 @@ class Controller:
             self.log("unit_picked", piece=name, bin=bin_id)
         return got
 
-    def _next_comp(self):
+    def _make_tray_verify(self):
+        """Vision place check: the piece must be SEEN inside the tray floor
+        band after settling — the observed unit count must grow by one."""
+        expected = len(self._placed) + 1
+
+        def verify():
+            st, hits = self._perceive_tray()
+            self.log("tray_observed", status=st, seen=len(hits))
+            return st == "ok" and len(hits) >= expected
+        return verify
+
+    def _rescue_spot(self):
+        """Vision-mode rescue: look at the tray + cart surround; a unit that
+        bounced out sits ON the cart/rim — outside the tray floor band."""
+        tp = self.skills.tray_pocket()
+        self.skills.servo(tp + np.array([0, 0, 0.40]), DOWN_X, 0.08,
+                          "observe_rescue")
+        st, hits = self.vision.observe_region(tp[:2], (0.22, 0.20),
+                                              floor_z=None, shrink=0.0)
+        if st != "ok":
+            return None, False
+        for _s, p in hits:
+            p = np.asarray(p)
+            if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.075
+                    and p[2] < tp[2] + 0.055):
+                continue  # properly inside — not the stray
+            if p[2] > tp[2] - 0.01:
+                return p, True
+        return None, False
+
+    def _next_comp(self, tall=False):
         """Next drop cell: opposite side of the accumulated x-moment so the
-        tray stays balanced for the final mast pinch."""
+        tray stays balanced for the final mast pinch. Tall pieces go to the
+        centre compartment — walls on both sides stop the tip-over."""
+        if tall:
+            return (0.0, 0.022 if len(self._placed) % 2 == 0 else -0.022)
         moment = sum(c[0] for c in self._placed)
         cx = -0.079 if moment > 0 else 0.079
         n_side = sum(1 for c in self._placed if c[0] == cx)
-        return (cx, 0.032 if n_side % 2 == 0 else -0.032)
+        return (cx, 0.022 if n_side % 2 == 0 else -0.022)
 
     def _piece_in_bin(self, name, bin_id):
         p = self.piece_pos_oracle(name)
