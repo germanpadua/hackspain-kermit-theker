@@ -7,7 +7,6 @@ reads object body positions — camera extrinsics (mjData cam_xpos/cam_xmat)
 are the declared calibration, and catalog colors are declared markers.
 """
 import cv2
-import mujoco
 import numpy as np
 
 MIN_AREA_PX = 8          # a piece must cover at least this many pixels
@@ -24,8 +23,10 @@ class WristVision:
     def __init__(self, sim):
         self.sim = sim
         self.cam_id = int(sim.model.camera("wrist").id)
-        self.sku_hue = {sid: HUE_BANDS[sid] for sid in sim.catalog["skus"]
-                        if sid in HUE_BANDS}
+        self.sku_hue = {sid: info.get("marker_hue", HUE_BANDS.get(sid))
+                        for sid, info in sim.catalog["skus"].items()}
+        if any(band is None for band in self.sku_hue.values()):
+            raise ValueError("Every SKU needs a marker_hue calibration")
 
     def _frame(self):
         rgb = self.sim.render("wrist")
@@ -48,6 +49,32 @@ class WristVision:
         # mujoco camera: looks down its -z, +x right, +y up (v flips)
         ray = np.array([(u - cx) * d / fx, -(v - cy) * d / fy, -d])
         return cam_pos + cam_mat @ ray
+
+    def _region_visible(self, rgb, depth, center_xy, half_xy, floor_z, z_band):
+        if floor_z is None:
+            return True
+        h, w = depth.shape
+        fx, fy, cx, cy = self._intrinsics(h, w)
+        pos, mat = self._extrinsics()
+        readable = 0
+        for dx in (-0.8, 0, 0.8):
+            for dy in (-0.8, 0, 0.8):
+                target = np.array([center_xy[0] + dx * half_xy[0],
+                                   center_xy[1] + dy * half_xy[1], floor_z + 0.01])
+                local = mat.T @ (target - pos)
+                distance = -local[2]
+                if distance <= 0 or distance > DEPTH_MAX_M:
+                    return False
+                u, v = cx + fx * local[0] / distance, cy - fy * local[1] / distance
+                if not (0 <= u < w and 0 <= v < h):
+                    return False
+                d = self._depth_at(depth, u, v)
+                if d is None or np.max(rgb[int(v), int(u)]) < 15:
+                    continue
+                observed = self._to_world(u, v, d, pos, mat, (fx, fy, cx, cy))
+                if floor_z - 0.025 < observed[2] < floor_z + z_band + 0.025:
+                    readable += 1
+        return readable >= 8
 
     def observe_bin(self, bin_id, bin_center_xy, bin_half_xy, floor_z=None):
         """Return (status, points) where status is 'ok'|'empty'|'unknown'
@@ -75,7 +102,8 @@ class WristVision:
         # sanity: the bin centre must project into the image at a readable
         # depth, otherwise the observation is invalid (UNKNOWN != EMPTY)
         d_mid = self._depth_at(depth, w / 2, h / 2)
-        if d_mid is None:
+        if d_mid is None or not self._region_visible(
+                rgb, depth, center_xy, in_half, floor_z, z_band):
             return "unknown", []
 
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(float)
@@ -90,22 +118,20 @@ class WristVision:
             for i in range(1, n):
                 if stats[i, cv2.CC_STAT_AREA] < MIN_AREA_PX:
                     continue
-                u, v = cent[i]
                 px = np.argwhere(lab == i)
-                ds = np.array([self._depth_at(depth, x, y)
-                               for y, x in px[::max(1, len(px) // 40)]])
-                ds = np.array([d for d in ds if d is not None])
-                if len(ds) == 0:
+                points = [self._to_world(x, y, d, cam_pos, cam_mat, intr)
+                          for y, x in px[::max(1, len(px) // 100)]
+                          if (d := self._depth_at(depth, x, y)) is not None]
+                if not points:
                     continue
-                world = self._to_world(u, v, float(np.median(ds)),
-                                       cam_pos, cam_mat, intr)
+                world = np.median(points, axis=0)
                 if (abs(world[0] - center_xy[0]) < in_half[0]
                         and abs(world[1] - center_xy[1]) < in_half[1]
                         and (floor_z is None or
                              floor_z - 0.02 < world[2] < floor_z + z_band)):
                     hits.append((sid, world))
         if not hits:
-            return "empty", []
+            return ("empty" if floor_z is not None else "unknown"), []
         return "ok", _merge_units(hits)
 
     def surface_free(self, center_xy, half_xy, floor_z):
@@ -140,7 +166,8 @@ class WristVision:
                     and abs(world[1] - center_xy[1]) < half_xy[1]
                     and world[2] > floor_z - 0.02):
                 return "occupied"
-        return "free"
+        return ("free" if self._region_visible(
+            rgb, depth, center_xy, half_xy, floor_z, 0.02) else "unknown")
 
     def _depth_at(self, depth, x, y):
         xi = int(np.clip(x, 0, depth.shape[1] - 1))
@@ -154,12 +181,18 @@ class WristVision:
 def _merge_units(hits):
     """Cluster same-SKU detections within MERGE_M into a single unit
     (a pawn's colored head can fragment into several blobs)."""
-    units = []
+    groups = []
     for sid, p in hits:
-        for u in units:
-            if u[0] == sid and np.linalg.norm(
-                    np.asarray(p)[:2] - np.asarray(u[1])[:2]) < MERGE_M:
+        for group_sid, points in groups:
+            if group_sid == sid and np.linalg.norm(
+                    np.asarray(p)[:2] - points[0][:2]) < MERGE_M:
+                points.append(np.asarray(p, float))
                 break
         else:
-            units.append([sid, np.asarray(p, float)])
-    return [(s, p) for s, p in units]
+            groups.append((sid, [np.asarray(p, float)]))
+    units = []
+    for sid, points in groups:
+        top = max(p[2] for p in points)
+        head = [p for p in points if p[2] >= top - 0.006]
+        units.append((sid, np.mean(head, axis=0)))
+    return units

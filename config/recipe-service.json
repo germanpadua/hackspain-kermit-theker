@@ -1,0 +1,8 @@
+{
+  "id": "WO-2026-M0142",
+  "workstation": "TRANSMISSION / MAINTENANCE 01",
+  "lines": [
+    {"sku": "ENGRANAJE", "qty": 1},
+    {"sku": "RODAMIENTO", "qty": 1}
+  ]
+}

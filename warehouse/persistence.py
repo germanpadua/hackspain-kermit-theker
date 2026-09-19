@@ -15,7 +15,9 @@ from warehouse.scene import ROOT
 def code_version():
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
     digest = hashlib.sha256()
-    files = sorted((ROOT / "warehouse").glob("*.py")) + sorted((ROOT / "config").glob("*.json"))
+    files = sorted((ROOT / "warehouse").glob("*.py"))
+    files += sorted((ROOT / "orderpick").glob("*.py"))
+    files += sorted((ROOT / "config").rglob("*.json"))
     files += [ROOT / "requirements-lock.txt"]
     for path in files:
         if path.exists():

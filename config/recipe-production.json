@@ -1,0 +1,9 @@
+{
+  "id": "WO-2026-0142",
+  "workstation": "TRANSMISSION / ASSEMBLY 01",
+  "lines": [
+    {"sku": "ENGRANAJE", "qty": 2},
+    {"sku": "RODAMIENTO", "qty": 1},
+    {"sku": "ESPARRAGO", "qty": 1}
+  ]
+}

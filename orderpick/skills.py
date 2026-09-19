@@ -1,16 +1,11 @@
-"""Manipulation skills: verified pick/place steps built on Motion primitives.
-
-Every skill returns a bool and leaves evidence via the sim state. Piece
-picks pinch the post just below the head (mechanical hold). The controller
-supplies estimated piece poses; the skills never read sim truth themselves —
-verification uses the piece's tracked lift (lift-height delta between the
-piece body and the grasp point is provided by the caller's estimate source).
-"""
+"""Contact manipulation with visual place callbacks and oracle logistics guards."""
 from __future__ import annotations
 
-import numpy as np
-
 import os
+
+import cv2
+import mujoco
+import numpy as np
 
 from .ik import IKSolver
 from .motion import Motion
@@ -18,11 +13,7 @@ from .scene import tray_pocket_world
 from .sim import DOWN, DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.016    # low on the post: pads stay clear of the head's
-                           # bottom rim (z 0.030) so they clamp the 7 mm post
-                           # (~16 mm gap) — the 24 mm head above the pads is a
-                           # physical stop: it cannot pass the closed gap, so
-                           # a held piece can never slide out during lifts
+PINCH_GP_OFFSET = 0.016    # pads clamp below the retaining head
 
 
 DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
@@ -50,19 +41,13 @@ class Skills:
         self._dump_idx = 0
 
     def _dump_frame(self):
-        import cv2
-        import mujoco
         cam = mujoco.MjvCamera()
         tp = self.sim.truth_body_pos("tray")
         cam.lookat[:] = tp + np.array([0, 0, 0.14])
         cam.distance = 0.28
         cam.azimuth = 90
         cam.elevation = -5
-        if self.sim.renderer is None:
-            self.sim.renderer = mujoco.Renderer(self.sim.model, height=480,
-                                                width=640)
-        self.sim.renderer.update_scene(self.sim.data, camera=cam)
-        img = self.sim.renderer.render().copy()
+        img = self.sim.render(cam, w=640, h=480)
         cv2.imwrite(f"{DUMP_DIR}/f{self._dump_idx:04d}_"
                     f"t{self.sim.data.time:.1f}.png",
                     cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
@@ -72,8 +57,7 @@ class Skills:
         for _ in range(n):
             self.sim.step(self.sim.config["control_steps"])
             self.motion.tick(self.sim.snapshot())
-            if DUMP_DIR and (self.hold_guard or getattr(
-                    self.motion.op, "label", "").startswith(
+            if DUMP_DIR and (self.hold_guard or self.motion.active_label.startswith(
                     ("tray", "pinch", "reseat"))):
                 self._dump_tick += 1
                 if self._dump_tick % 12 == 0:
@@ -204,19 +188,16 @@ class Skills:
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
         if not (pinch_band[0] < f < pinch_band[1]):
             if DUMP_DIR:
-                import cv2
-                import mujoco
                 cam = mujoco.MjvCamera()
                 pp = np.asarray(pos, float)
                 cam.lookat[:] = [pp[0], pp[1], pp[2] + 0.03]
                 cam.distance = 0.30
                 cam.azimuth = 160
                 cam.elevation = -35
-                self.sim.renderer.update_scene(self.sim.data, camera=cam)
+                image = self.sim.render(cam, w=640, h=480)
                 cv2.imwrite(f"{DUMP_DIR}/reject_f{f:.3f}_"
                             f"t{self.sim.data.time:.0f}.png",
-                            cv2.cvtColor(self.sim.renderer.render().copy(),
-                                       cv2.COLOR_RGB2BGR))
+                            cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             self.open(0.4)  # release whatever was caught, then lift clear
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
                        DOWN, 0.05, "pick_reject_lift")
@@ -264,21 +245,18 @@ class Skills:
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.03, "drop_abort")
             return False
-        # release low: fingertips ~3 cm above the tray floor — the piece
-        # drops ~2 cm and cannot build bounce energy over the rim lips
-        ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.025, "release")
+        release_height = self.sim.config["tray"]["size_xyz_m"][2] + 0.04
+        ok = self.servo(tp + np.array([0, 0, release_height]), DOWN_X, 0.025, "release")
         if not ok:
             # one retry from a touch higher, then drop into the walls anyway
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.14]),
                        DOWN_X, 0.02, "relift")
-            ok = self.servo(tp + np.array([0, 0, 0.04]), DOWN_X, 0.02,
+            ok = self.servo(tp + np.array([0, 0, release_height]), DOWN_X, 0.02,
                             "release2")
         if not ok:
             self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.025, "aborted")
         self.spin(35)  # let the pinched piece stop swinging before release
         self.open(0.6)
-        # fingers finish opening below the rim; lift a bit so a perched piece
-        # cannot hook a fingertip when the arm swings home
         self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
                    DOWN_X, 0.02, "postlift")
         if verify is not None:
@@ -291,9 +269,11 @@ class Skills:
         # (z >= ~0.10) or outside the footprint counts as a miss.
         for _ in range(45):
             self.spin(40)
-            rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
+            com = self.sim.data.xipos[self.sim.model.body(piece_name).id]
+            tq = _quat_mat(self.sim.truth_body_quat("tray"))
+            rel = tq.T @ (com - self.sim.truth_body_pos("tray"))
             if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
-                    and -0.02 < rel[2] < 0.098):
+                    and 0.0 < rel[2] < 0.098):
                 return True
         return False
 

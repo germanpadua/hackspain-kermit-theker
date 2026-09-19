@@ -1,26 +1,22 @@
-"""Autonomous order-preparation controller (oracle pose mode).
+"""Kit preparation with product vision and oracle-assisted logistics.
 
-State machine over Skills: for each order line, drive to the slot, perceive
-(oracle for now), pick with a bounded retry budget, deposit in the onboard
-tray. When the front bin is empty, remove it to the park and pull the
-reserve bin forward by its lip.
-
-Verification stays sensor-shaped: captures are reported by the pinch-width
-encoder and by tray/piece observations; controller never reads body truth.
+Bins, tray pose, rescue geometry and tray-slip monitoring still use truth.
+Final evaluation lives separately in verification.py.
 """
 from __future__ import annotations
 
+from collections import Counter
 import os
 
 import cv2
 import numpy as np
 
 from . import skills as skills_mod
-from .ik import IKSolver
-from .motion import Motion
 from .perception import WristVision
-from .scene import bin_origin, piece_name, tray_pocket_world
-from .sim import DOWN, DOWN_X, CellSim
+from .orders import compartment_bounds, compartment_for
+from .contracts import Phase
+from .scene import PART_MARKER_TOP_M, bin_origin
+from .sim import DOWN_X, CellSim
 from .skills import Skills, _quat_mat
 
 BIN_POST_GP_Z = 0.118      # gp above bin origin -> pads just under the head
@@ -38,9 +34,14 @@ class Controller:
         self.sim = sim
         self.skills = Skills(sim)
         self.motion = self.skills.motion
-        self.events = []
+        self.events: list[dict[str, object]] = []
         self.max_retries = 2
-        self._placed = []         # tray drop cells used — load balancing
+        self._placed: list[tuple[float, float]] = []
+        self._placed_skus: list[str] = []
+        self._confirmed_empty: set[str] = set()
+        self._order: dict[str, int] = {}
+        self._bin_sku: dict[str, str] = {}
+        self.blocked = False
         if perception not in ("oracle", "vision"):
             raise ValueError(f"unknown perception mode {perception!r}")
         self.perception = perception
@@ -48,6 +49,10 @@ class Controller:
 
     def log(self, kind, **kw):
         self.events.append({"t": round(self.sim.data.time, 3), "kind": kind, **kw})
+
+    def set_state(self, phase):
+        self.sim.set_process_state(phase)
+        self.log("process_state", state=phase.value)
 
     def spin(self, n=10):
         self.skills.spin(n)
@@ -92,18 +97,20 @@ class Controller:
         for s, p in sorted((h for h in hits if h[0] == sku),
                            key=lambda h: h[1][1]):
             p = np.asarray(p, float)
-            p[2] = bo[2] + 0.005    # perceived xy is the head marker; the pick
-            units.append(p)          # needs the piece's base height
+            p[2] -= PART_MARKER_TOP_M
+            units.append(p)
         return st, units
 
     def _perceive_tray(self):
         """Observe the onboard tray from above; returns (status, units)
         where units are world positions inside the tray floor band."""
-        tp = self.skills.tray_pocket()
+        tp = self.sim.truth_body_pos("tray")
         self.skills.servo(tp + np.array([0, 0, 0.36]), DOWN_X, 0.08,
                           "observe_tray")
+        tray = self.sim.config["tray"]
+        half = tuple(length / 2 - tray["wall_m"] for length in tray["size_xyz_m"][:2])
         st, hits = self.vision.observe_region(
-            tp[:2], (0.115, 0.09), floor_z=tp[2], shrink=0.02, z_band=0.095)
+            tp[:2], half, floor_z=tp[2], z_band=tray["size_xyz_m"][2] - .005)
         return st, hits
 
     # ---------- top level ----------
@@ -111,12 +118,15 @@ class Controller:
         """order: list[(sku, qty)]; slot_map: {sku: (slot_x, [front,reserve])}.
         Returns True when every unit is verified in the tray."""
         self._order = dict(order)
+        self.log("order_received", recipe_id=self.sim.recipe.id, order=self._order)
+        self.set_state(Phase.ORDER_RECEIVED)
         self._bin_sku = {b: sku for sku, (_x, bins) in slot_map.items()
                          for b in bins}
         self._bin_row = {b: i for sku, (_x, bins) in slot_map.items()
                          for i, b in enumerate(bins)}
         complete = True
         for sku, qty in order:
+            self.set_state(Phase.PICKING)
             slot_x, bins = slot_map[sku]
             need = qty
             for bin_id in bins:
@@ -127,7 +137,12 @@ class Controller:
                     return False
                 got = self._pick_units(bin_id, sku, need)
                 need -= got
+                if self.blocked:
+                    return False
                 if need > 0 and len(bins) > 1 and bin_id == bins[0]:
+                    if bin_id not in self._confirmed_empty:
+                        self.log("front_not_empty_confirmed", bin=bin_id, remaining=need)
+                        break
                     self.log("front_depleted", bin=bin_id, remaining=need)
                     if not self.advance_reserve(bin_id, bins[1]):
                         self.log("reserve_fail", bin=bins[1])
@@ -139,13 +154,15 @@ class Controller:
                 # a partial order is INCOMPLETE, not a success
                 self.log("order_shortfall", sku=sku, missing=need)
                 complete = False
+        if not complete:
+            self.set_state(Phase.ORDER_INCOMPLETE)
         return complete
 
     def _pick_units(self, bin_id, sku, want):
         got = 0
         tries = 0
         obs_retries = 0
-        while got < want and tries < want * (self.max_retries + 1):
+        while got < want and tries < want * (self.max_retries + 1) and not self.blocked:
             tries += 1
             if self.perception == "vision":
                 # re-observe EVERY attempt: the bin's content changed by the
@@ -154,19 +171,24 @@ class Controller:
                 if st == "unknown":
                     self.log("obs_invalid", bin=bin_id)
                     obs_retries += 1
-                    if obs_retries > 1:
+                    if obs_retries > self.max_retries:
                         self.log("bin_unreadable", bin=bin_id)
+                        self.blocked = True
+                        self.set_state(Phase.PERCEPTION_STOP)
                         break
                     continue
                 obs_retries = 0
-                if st == "empty" or not units:
+                if st == "empty":
+                    self._confirmed_empty.add(bin_id)
                     self.log("bin_seen_empty", bin=bin_id)
+                    self.set_state(Phase.TOTE_DEPLETED)
+                    break
+                self._confirmed_empty.discard(bin_id)
+                if not units:
+                    self.log("sku_not_found", bin=bin_id, sku=sku)
                     break
                 pos = units[0]
                 name = None     # the controller never sees piece names
-                # ~2cm pose error means the pinch can land on the head brim
-                # instead of the neck: fing width >0.0155 is a brim catch
-                # (a head-edge catch still holds on the 10 mm block) — reject it
                 if not self.skills.pick_piece(pos, None,
                                               pinch_band=(0.0045, 0.022)):
                     self.log("pick_miss", piece="?", bin=bin_id,
@@ -178,6 +200,11 @@ class Controller:
                                   + np.array([0, 0, 0.12]), DOWN_X, 0.04,
                                   "pick_verify_lift")
                 st2, units2 = self._perceive_bin(bin_id, sku)
+                if st2 == "unknown":
+                    self.log("pick_unverified", bin=bin_id)
+                    self.blocked = True
+                    self.set_state(Phase.PERCEPTION_STOP)
+                    break
                 if st2 == "ok" and any(
                         np.linalg.norm(u[:2] - pos[:2]) < 0.04
                         for u in units2):
@@ -192,25 +219,26 @@ class Controller:
                          if self.sim.piece_bin.get(n) == bin_id
                          and self._piece_in_bin(n, bin_id)]
                 if not names:
+                    self._confirmed_empty.add(bin_id)
+                    self.log("bin_seen_empty", bin=bin_id)
+                    self.set_state(Phase.TOTE_DEPLETED)
                     break
-                name = sorted(names)[0]
+                name = min(names, key=lambda candidate: self.piece_pos_oracle(candidate)[1])
                 pos = self.piece_pos_oracle(name)
                 if not self.skills.pick_piece(pos, name):
                     self.log("pick_miss", piece=name, bin=bin_id)
                     continue
-            # drop at outer-compartment centres (x +-0.079, dividers at
-            # +-0.040) with +-0.032 y offset (finger pads stay clear of the
-            # pocket lips); the side is chosen to keep the tray's x-moment
-            # ~0 — an unbalanced load torques the post out of the pinch
-            comp = self._next_comp(tall=(sku == "ESPARRAGO"))
-            verify = self._make_tray_verify() if self.vision else None
+            comp = self._next_comp(sku)
+            verify = self._make_place_verify(sku, name)
             if not self.skills.place_in_tray(name, comp_xy=comp,
                                              verify=verify):
                 self.log("place_miss", piece=name, bin=bin_id)
+                if self.blocked:
+                    return got
                 # rescue: re-observe the piece where it actually landed and
                 # re-pick it — recoverable only while it rests near tray top
                 if self.vision:
-                    p2, near_tray = self._rescue_spot()
+                    p2, near_tray = self._rescue_spot(sku)
                 else:
                     p2 = self.piece_pos_oracle(name)
                     tp = self.skills.tray_pocket()
@@ -218,24 +246,27 @@ class Controller:
                                  and abs(p2[1] - tp[1]) < 0.20
                                  and p2[2] > tp[2] - 0.01)
                 if near_tray and self.skills.pick_piece(p2, name):
-                    v2 = self._make_tray_verify() if self.vision else None
+                    v2 = self._make_place_verify(sku, name)
                     if self.skills.place_in_tray(
                             name, comp_xy=(comp[0], -comp[1]), verify=v2):
                         self._placed.append((comp[0], -comp[1]))
+                        self._placed_skus.append(sku)
                         got += 1
                         self.log("unit_picked", piece=name, bin=bin_id,
                                  rescued=True)
                         continue
                     self.log("place_miss", piece=name, bin=bin_id)
-                    if self._piece_in_tray(name):
+                    if self._piece_in_tray(name, sku):
                         self._placed.append(comp)
+                        self._placed_skus.append(sku)
                         got += 1
                         self.log("unit_picked", piece=name, bin=bin_id,
                                  rescued=True)
-                elif self._piece_in_tray(name):
+                elif self._piece_in_tray(name, sku):
                     # bounced/perched pieces can settle inside after the
                     # verify window — count it instead of declaring it lost
                     self._placed.append(comp)
+                    self._placed_skus.append(sku)
                     got += 1
                     self.log("unit_picked", piece=name, bin=bin_id,
                              rescued=True)
@@ -243,42 +274,72 @@ class Controller:
                     self.log("piece_lost", piece=name)
                 continue
             self._placed.append(comp)
+            self._placed_skus.append(sku)
             got += 1
             self.log("unit_picked", piece=name, bin=bin_id)
         return got
 
-    def _piece_in_tray(self, name):
-        """Oracle: is THIS piece inside the tray containment band? Vision:
-        did the observed unit count grow past the placed tally?"""
+    def _piece_in_tray(self, name, sku):
+        """Check containment after delayed settling."""
         if self.vision:
             for _ in range(3):
                 self.spin(40)
-            st, hits = self._perceive_tray()
-            self.log("tray_observed", status=st, seen=len(hits))
-            return st == "ok" and len(hits) >= len(self._placed) + 1
+            return self._make_place_verify(sku, name)()
         tp = self.sim.truth_body_pos("tray")
-        rel = self.piece_pos_oracle(name) - tp
-        return (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
-                and -0.02 < rel[2] < 0.098)
+        tq = _quat_mat(self.sim.truth_body_quat("tray"))
+        com = self.sim.data.xipos[self.sim.model.body(name).id]
+        rel = tq.T @ (com - tp)
+        index = compartment_for(self.sim.config, rel[0], rel[1])
+        return (index is not None
+                and self.sim.config["tray"]["compartment_skus"][index] == sku
+                and 0.0 < rel[2] < 0.098)
 
-    def _make_tray_verify(self):
+    def _make_tray_verify(self, sku):
         """Vision place check: the piece must be SEEN inside the tray floor
         band after settling — the observed unit count must grow by one."""
-        expected = len(self._placed) + 1
+        expected = Counter(self._placed_skus)
+        expected[sku] += 1
 
         def verify():
-            # re-observe across the settle window: a piece still bouncing
-            # reads above the tray band on the first frames
             for _ in range(4):
                 st, hits = self._perceive_tray()
                 self.log("tray_observed", status=st, seen=len(hits))
-                if st == "ok" and len(hits) >= expected:
+                if st == "unknown":
+                    self.log("obs_invalid", region="tray")
+                if st == "ok" and Counter(s for s, _p in hits) == expected:
                     return True
                 self.spin(50)
+            if st == "unknown":
+                self.blocked = True
+                self.set_state(Phase.PERCEPTION_STOP)
             return False
         return verify
 
-    def _rescue_spot(self):
+    def _make_place_verify(self, sku, name):
+        count_verify = self._make_tray_verify(sku)
+
+        def verify():
+            if not self.vision:
+                return self._piece_in_tray(name, sku)
+            if not count_verify():
+                return False
+            status, hits = self._perceive_tray()
+            if status == "unknown":
+                self.blocked = True
+                self.set_state(Phase.PERCEPTION_STOP)
+            if status != "ok":
+                return False
+            rotation = _quat_mat(self.sim.truth_body_quat("tray"))
+            origin = self.sim.truth_body_pos("tray")
+            for detected, point in hits:
+                relative = rotation.T @ (point - origin)
+                index = compartment_for(self.sim.config, relative[0], relative[1])
+                if index is None or self.sim.config["tray"]["compartment_skus"][index] != detected:
+                    return False
+            return True
+        return verify
+
+    def _rescue_spot(self, sku):
         """Vision-mode rescue: look at the tray + cart surround; a unit that
         bounced out sits ON the cart/rim — outside the tray floor band."""
         tp = self.skills.tray_pocket()
@@ -288,7 +349,9 @@ class Controller:
                                               floor_z=None, shrink=0.0)
         if st != "ok":
             return None, False
-        for _s, p in hits:
+        for detected_sku, p in hits:
+            if detected_sku != sku:
+                continue
             p = np.asarray(p)
             if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.09
                     and p[2] < tp[2] + 0.055):
@@ -298,22 +361,15 @@ class Controller:
                 return p, True
         return None, False
 
-    def _next_comp(self, tall=False):
-        """Next drop slot: each unit gets its own cell+row — stacking a drop
-        on a previous piece tips it onto the rim and out. The slot order
-        alternates x-sides so the tray's x-moment stays ~0 for the final
-        mast pinch; tall pieces take the centre cells (walled both sides)."""
-        if tall:
-            seq = [(0.0, -0.03), (0.0, 0.03),
-                   (-0.079, -0.03), (0.079, 0.03)]
-        else:
-            seq = [(-0.079, -0.03), (0.079, -0.03),
-                   (0.079, 0.03), (-0.079, 0.03),
-                   (0.0, -0.03), (0.0, 0.03)]
-        for c in seq:
-            if c not in self._placed:
-                return c
-        return seq[0]
+    def _next_comp(self, sku):
+        tray = self.sim.config["tray"]
+        index = tray["compartment_skus"].index(sku)
+        left, right, _front, _back = compartment_bounds(self.sim.config, index)
+        center = (left + right) / 2
+        for y in (-tray["drop_y_m"], tray["drop_y_m"]):
+            if (center, y) not in self._placed:
+                return center, y
+        raise ValueError(f"No unused drop position for {sku}")
 
     def _piece_in_bin(self, name, bin_id):
         p = self.piece_pos_oracle(name)
@@ -327,8 +383,7 @@ class Controller:
         markers); oracle reads the fixture body (labeled debug path)."""
         cfg = self.sim.config[kind]
         c = np.array([cfg["x_m"], cfg["y_m"]])
-        half = ((0.15, 0.15) if kind == "park"
-                else (cfg["size_xy_m"][0] / 2, cfg["size_xy_m"][1] / 2))
+        half = (cfg["size_xy_m"][0] / 2, cfg["size_xy_m"][1] / 2)
         if self.vision:
             self.skills.servo(np.array([c[0], c[1], cfg["surface_z_m"] + 0.30]),
                               DOWN_X, 0.10, f"observe_{kind}")
@@ -346,7 +401,12 @@ class Controller:
         free = self._surface_free("park")
         if free != "free":
             self.log("park_unavailable", status=free)
+            if free == "unknown":
+                self.log("obs_invalid", region="park")
+                self.blocked = True
+                self.set_state(Phase.PERCEPTION_STOP)
             return False
+        self.set_state(Phase.ADVANCE_RESERVE)
         # 1) pinch front bin's post, lift, park
         bo = self.bin_pos_oracle(front_bin)
         gp = np.array([bo[0], bo[1] + 0.0865, bo[2] + BIN_POST_GP_Z])
@@ -399,6 +459,7 @@ class Controller:
             self.log("reserve_drag_fail", bin=reserve_bin, y=float(b2[1]))
             return False
         self.log("reserve_advanced", bin=reserve_bin, y=float(b2[1]))
+        self.set_state(Phase.PICKING)
         return True
 
     def _pinch_ok(self, lo, hi):
@@ -417,6 +478,9 @@ class Controller:
         and deposit the tray on the table."""
         sk = self.skills
         rc = self.sim.config["reception"]
+        target_x = rc["x_m"] + rc["target_offset_xy_m"][0]
+        target_y = rc["y_m"] + rc["target_offset_xy_m"][1]
+        self.set_state(Phase.DRIVE_RECEPTION)
         if not sk.stow():
             sk.stow()  # one retry: a failed stow leaves the arm mid-pose
         self.motion.drive_cart(rc["x_m"] - 0.20)
@@ -427,6 +491,10 @@ class Controller:
         free = self._surface_free("reception")
         if free != "free":
             self.log("reception_unavailable", status=free)
+            if free == "unknown":
+                self.log("obs_invalid", region="reception")
+                self.blocked = True
+                self.set_state(Phase.PERCEPTION_STOP)
             return False
         # pinch -> lift -> carry -> lower, retried end-to-end: a slipped mast
         # usually drops back onto the pocket lip near-vertical, so a fresh
@@ -509,9 +577,9 @@ class Controller:
             ok = False
             for label, tgt in (("tray_lift", np.array([seat[0], seat[1],
                                                        carry_z])),
-                               ("tray_carry", np.array([rc["x_m"], rc["y_m"],
+                               ("tray_carry", np.array([target_x, target_y,
                                                         carry_z])),
-                               ("tray_lower", np.array([rc["x_m"], rc["y_m"],
+                               ("tray_lower", np.array([target_x, target_y,
                                        rc["surface_z_m"] + TRAY_POST_GP_Z
                                        + 0.01]))):
                 # gentle accel on loaded legs: hard jerks slide the post out
@@ -536,9 +604,20 @@ class Controller:
                 sk.servo(np.array([seat[0], seat[1],
                                    seat[2] + 0.19]), DOWN_X, 0.03, "abort_low")
             sk.open(0.6)
-            sk.hover_to(np.array([rc["x_m"], rc["y_m"],
-                                  rc["surface_z_m"] + 0.16]),
-                        DOWN_X, [0, 0, 0])
+            if ok:
+                under_table = np.array([target_x, target_y,
+                                        rc["surface_z_m"] + TRAY_UNDER_Z])
+                if not sk.servo(under_table, DOWN_X, 0.02, "tray_unseat"):
+                    self.log("tray_release_fail", leg="unseat")
+                    return False
+                if not sk.servo(under_table + np.array([0.047, 0, 0]),
+                                DOWN_X, 0.02, "tray_withdraw"):
+                    self.log("tray_release_fail", leg="withdraw")
+                    return False
+                if not sk.servo(under_table + np.array([0.047, 0, 0.20]),
+                                DOWN_X, 0.04, "tray_clear"):
+                    self.log("tray_release_fail", leg="clear")
+                    return False
             self.spin(30)
             if not ok:
                 self.log("tray_carry_slip",
@@ -560,7 +639,7 @@ class Controller:
                 self.log("tray_delivered",
                          at=[round(float(v), 3) for v in tp],
                          content=content,
-                         verified=content == getattr(self, "_order", None))
+                         verified=content == self._order)
                 return True
             self.log("tray_delivery_fail",
                      at=[round(float(v), 3) for v in tp], qw=round(qw, 3))
@@ -576,11 +655,10 @@ class Controller:
         tq = _quat_mat(self.sim.truth_body_quat("tray"))
         counts = {}
         for n in self.sim.piece_qadr:
-            rel = tq.T @ (self.sim.truth_body_pos(n) - tp)
+            rel = tq.T @ (self.sim.data.xipos[self.sim.model.body(n).id] - tp)
             if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09 \
-                    and -0.02 < rel[2] < 0.10:
-                sku = getattr(self, "_bin_sku", {}).get(
-                    self.sim.piece_bin.get(n), "?")
+                    and 0.0 < rel[2] < 0.10:
+                sku = self._bin_sku.get(self.sim.piece_bin.get(n), "?")
                 counts[sku] = counts.get(sku, 0) + 1
         return counts
 
