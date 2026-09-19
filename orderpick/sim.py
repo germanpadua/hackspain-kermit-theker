@@ -30,6 +30,12 @@ class CellSim:
         self.catalog = load_config("catalog")
         self.seed = seed
         self.scenario = scenario
+        if scenario == "reserve_empty":
+            for e in self.catalog["bins"]:
+                if e["id"] == "bin-a-reserve":
+                    e["units"] = 0
+        self.glitch_frames = {"obs_glitch": 4,
+                              "obs_occluded": 10**9}.get(scenario, 0)
         spec = build_spec(self.config, self.catalog)
         self.model = spec.compile()
         self.data = mujoco.MjData(self.model)
@@ -136,6 +142,13 @@ class CellSim:
             pk = self.config["park"]
             self._set_obstacle("park_obstacle",
                                [pk["x_m"], pk["y_m"], pk["surface_z_m"] + 0.05])
+        elif s == "grasp_slip":
+            # first front-bin piece post gets polished torsion friction —
+            # the initial pinch slips through the pads (retry may succeed)
+            for e in self.catalog["bins"]:
+                if e["id"] == "bin-a-front":
+                    gid = int(self.model.geom("piece_bin-a-front_0_neck").id)
+                    self.model.geom_friction[gid] = [0.15, 0.01, 0.001]
 
     def _set_obstacle(self, name, pos):
         adr = self.obstacle_qadr[name]
@@ -182,6 +195,9 @@ class CellSim:
             if camera == "wrist" else (self.config["cameras"]["overview_w"],
                                        self.config["cameras"]["overview_h"])
         if depth:
+            if self.glitch_frames > 0 and camera == "wrist":
+                self.glitch_frames -= 1
+                return np.full((max(h, 360), max(w, 640)), np.nan)
             if self.renderer_depth is None:
                 self.renderer_depth = mujoco.Renderer(
                     self.model, height=max(h, 360), width=max(w, 640))
@@ -191,7 +207,11 @@ class CellSim:
         if self.renderer is None:
             self.renderer = mujoco.Renderer(self.model, height=max(h, 360), width=max(w, 640))
         self.renderer.update_scene(self.data, camera=camera)
-        return self.renderer.render().copy()
+        frame = self.renderer.render().copy()
+        if self.glitch_frames > 0 and camera == "wrist":
+            self.glitch_frames -= 1
+            frame = np.zeros_like(frame)
+        return frame
 
     # ---------- evaluator-only truth API ----------
     def truth_body_pos(self, name):

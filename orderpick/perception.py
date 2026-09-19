@@ -10,9 +10,9 @@ import cv2
 import mujoco
 import numpy as np
 
-MIN_AREA_PX = 12          # a piece must cover at least this many pixels
+MIN_AREA_PX = 8          # a piece must cover at least this many pixels
 DEPTH_MAX_M = 0.75        # wrist camera reads within this range
-SAT_MIN = 0.50            # reject unsaturated (shadow/steel/bin wall) pixels
+SAT_MIN = 0.32            # reject unsaturated (shadow/steel/bin wall) pixels
 MERGE_M = 0.05            # same-SKU hits closer than this are one unit
 # Rendered hues per SKU (calibrated on the actual render — scene lighting
 # whitewashes the flat rgba toward cyan, so bands match the OBSERVED hue)
@@ -107,6 +107,40 @@ class WristVision:
         if not hits:
             return "empty", []
         return "ok", _merge_units(hits)
+
+    def surface_free(self, center_xy, half_xy, floor_z):
+        """Scenario fixtures are declared magenta markers: a hit inside the
+        surface ROI means the surface is OCCUPIED. Returns 'free',
+        'occupied', or 'unknown' (ROI not readable — never treated free)."""
+        rgb, depth = self._frame()
+        h, w = rgb.shape[:2]
+        d_mid = self._depth_at(depth, w / 2, h / 2)
+        if d_mid is None:
+            return "unknown"
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(float)
+        mask = ((hsv[..., 0] >= 140) & (hsv[..., 0] <= 175)
+                & (hsv[..., 1] / 255.0 > 0.35)).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        cam_pos, cam_mat = self._extrinsics()
+        intr = self._intrinsics(h, w)
+        n, lab, stats, cent = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_AREA] < 30:
+                continue
+            u, v = cent[i]
+            px = np.argwhere(lab == i)
+            ds = np.array([self._depth_at(depth, x, y)
+                           for y, x in px[::max(1, len(px) // 40)]])
+            ds = np.array([d for d in ds if d is not None])
+            if len(ds) == 0:
+                continue
+            world = self._to_world(u, v, float(np.median(ds)),
+                                   cam_pos, cam_mat, intr)
+            if (abs(world[0] - center_xy[0]) < half_xy[0]
+                    and abs(world[1] - center_xy[1]) < half_xy[1]
+                    and world[2] > floor_z - 0.02):
+                return "occupied"
+        return "free"
 
     def _depth_at(self, depth, x, y):
         xi = int(np.clip(x, 0, depth.shape[1] - 1))

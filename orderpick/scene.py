@@ -407,7 +407,8 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
         body = world.add_body(name=name, pos=[-0.6 - 0.25 * k, -2.5, 0.05])
         body.add_freejoint(name=f"{name}_free")
         body.add_geom(name=f"{name}_g", type=mujoco.mjtGeom.mjGEOM_BOX,
-                      size=[0.06, 0.05, 0.05], mass=0.9, rgba=[0.80, 0.15, 0.15, 1])
+                      size=[0.06, 0.05, 0.05], mass=0.9,
+                      rgba=[0.80, 0.12, 0.80, 1])  # magenta = obstacle marker
 
     world.add_camera(name="overview", pos=[0.85, -1.75, 1.35],
                      xyaxes=[0.95, 0.31, 0, -0.20, 0.62, 0.75], fovy=55)

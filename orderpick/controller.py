@@ -71,13 +71,20 @@ class Controller:
         e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
         bo = bin_origin(self.sim.config, e["slot"], e["depth_row"])
         tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
+        row = self._bin_row.get(bin_id, e["depth_row"])
+        if row != e["depth_row"]:
+            bo = bin_origin(self.sim.config, e["slot"], row)
         self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
         half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
                 self.sim.config["bin"]["size_xyz_m"][1] / 2)
         st, hits = self.vision.observe_bin(bin_id, bo[:2], half,
                                            floor_z=bo[2])
-        units = sorted((np.asarray(p) for s, p in hits if s == sku),
-                       key=lambda p: p[1])
+        units = []
+        for s, p in sorted((h for h in hits if h[0] == sku),
+                           key=lambda h: h[1][1]):
+            p = np.asarray(p, float)
+            p[2] = bo[2] + 0.0105   # perceived z is the head top; the pick
+            units.append(p)          # needs the piece's base height
         return st, units
 
     def _perceive_tray(self):
@@ -97,6 +104,8 @@ class Controller:
         self._order = dict(order)
         self._bin_sku = {b: sku for sku, (_x, bins) in slot_map.items()
                          for b in bins}
+        self._bin_row = {b: i for sku, (_x, bins) in slot_map.items()
+                         for i, b in enumerate(bins)}
         for sku, qty in order:
             slot_x, bins = slot_map[sku]
             need = qty
@@ -113,6 +122,8 @@ class Controller:
                     if not self.advance_reserve(bin_id, bins[1]):
                         self.log("reserve_fail", bin=bins[1])
                         return False
+                    # reserve physically sits at the front row now
+                    self._bin_row[bins[1]] = 0
             if need > 0:
                 self.log("order_shortfall", sku=sku, missing=need)
                 return False
@@ -121,30 +132,42 @@ class Controller:
     def _pick_units(self, bin_id, sku, want):
         got = 0
         tries = 0
-        pending = []            # vision: perceived unit positions not yet tried
         obs_retries = 0
         while got < want and tries < want * (self.max_retries + 1):
             tries += 1
             if self.perception == "vision":
-                if not pending:
-                    st, pending = self._perceive_bin(bin_id, sku)
-                    if st == "unknown":
-                        self.log("obs_invalid", bin=bin_id)
-                        obs_retries += 1
-                        if obs_retries > 1:
-                            self.log("bin_unreadable", bin=bin_id)
-                            break
-                        st, pending = self._perceive_bin(bin_id, sku)
-                        if st == "unknown":
-                            self.log("bin_unreadable", bin=bin_id)
-                            break
-                    if st == "empty" or not pending:
-                        self.log("bin_seen_empty", bin=bin_id)
+                # re-observe EVERY attempt: the bin's content changed by the
+                # previous pick, so cached positions would be stale
+                st, units = self._perceive_bin(bin_id, sku)
+                if st == "unknown":
+                    self.log("obs_invalid", bin=bin_id)
+                    obs_retries += 1
+                    if obs_retries > 1:
+                        self.log("bin_unreadable", bin=bin_id)
                         break
-                pos = pending.pop(0)
+                    continue
+                obs_retries = 0
+                if st == "empty" or not units:
+                    self.log("bin_seen_empty", bin=bin_id)
+                    break
+                pos = units[0]
                 name = None     # the controller never sees piece names
                 if not self.skills.pick_piece(pos, None):
                     self.log("pick_miss", piece="?", bin=bin_id)
+                    continue
+                # verify the pick: lift the held unit clear of the bin's
+                # z-band, then the aimed spot must read empty
+                self.skills.servo(self.sim.grasp_point()
+                                  + np.array([0, 0, 0.12]), DOWN_X, 0.04,
+                                  "pick_verify_lift")
+                st2, units2 = self._perceive_bin(bin_id, sku)
+                if st2 == "ok" and any(
+                        np.linalg.norm(u[:2] - pos[:2]) < 0.04
+                        for u in units2):
+                    # whatever the jaws hold, it is NOT that unit — drop it
+                    self.skills.open(0.4)
+                    self.log("pick_miss", piece="?", bin=bin_id,
+                             why="unit_still_there")
                     continue
             else:
                 # perceived units: oracle returns the remaining pieces
@@ -222,6 +245,7 @@ class Controller:
                     and p[2] < tp[2] + 0.055):
                 continue  # properly inside — not the stray
             if p[2] > tp[2] - 0.01:
+                p[2] = tp[2] + 0.0105   # perceived z is a top face
                 return p, True
         return None, False
 
@@ -242,11 +266,32 @@ class Controller:
         return abs(p[0] - b[0]) < 0.09 and abs(p[1] - b[1]) < 0.09 \
             and 0.0 < p[2] - b[2] < 0.10
 
+    def _surface_free(self, kind):
+        """Verify a surface is clear before placing something on it.
+        Vision mode observes it with the wrist camera (magenta obstacle
+        markers); oracle reads the fixture body (labeled debug path)."""
+        cfg = self.sim.config[kind]
+        c = np.array([cfg["x_m"], cfg["y_m"]])
+        half = ((0.15, 0.15) if kind == "park"
+                else (cfg["size_xy_m"][0] / 2, cfg["size_xy_m"][1] / 2))
+        if self.vision:
+            self.skills.servo(np.array([c[0], c[1], cfg["surface_z_m"] + 0.30]),
+                              DOWN_X, 0.10, f"observe_{kind}")
+            return self.vision.surface_free(c, half, cfg["surface_z_m"])
+        obs = self.sim.truth_body_pos(f"{kind}_obstacle")
+        return ("occupied" if abs(obs[0] - c[0]) < half[0]
+                and abs(obs[1] - c[1]) < half[1]
+                and obs[2] > cfg["surface_z_m"] - 0.02 else "free")
+
     # ---------- reserve advance ----------
     def advance_reserve(self, front_bin, reserve_bin):
         """Remove the empty front bin to the park, then pull the reserve bin
         forward by hooking its front lip."""
         sk = self.skills
+        free = self._surface_free("park")
+        if free != "free":
+            self.log("park_unavailable", status=free)
+            return False
         # 1) pinch front bin's post, lift, park
         bo = self.bin_pos_oracle(front_bin)
         gp = np.array([bo[0], bo[1] + 0.0865, bo[2] + BIN_POST_GP_Z])
@@ -324,6 +369,10 @@ class Controller:
             self.log("cart_error", at="reception")
             return False
         self.log("cart_at_reception", cart=float(self.sim.data.qpos[self.sim.cart_qadr]))
+        free = self._surface_free("reception")
+        if free != "free":
+            self.log("reception_unavailable", status=free)
+            return False
         # pinch -> lift -> carry -> lower, retried end-to-end: a slipped mast
         # usually drops back onto the pocket lip near-vertical, so a fresh
         # pinch from the tray's true pose recovers it. A tray resting flat
