@@ -1,0 +1,110 @@
+{
+  "timestep_s": 0.002,
+  "control_steps": 10,
+  "rail": {
+    "y_m": -0.45,
+    "x_min_m": -0.3,
+    "x_max_m": 2.05,
+    "speed_m_s": 0.25,
+    "accel_m_s2": 0.5
+  },
+  "cart": {
+    "plate_xyz_m": [
+      0.46,
+      0.26,
+      0.1
+    ],
+    "home_x_m": 0.0,
+    "mass_kg": 6.0
+  },
+  "arm_base_xyz_m": [
+    -0.1,
+    -0.02,
+    0.42
+  ],
+  "tray_pocket_xyz_m": [
+    0.16,
+    -0.02,
+    0.215
+  ],
+  "shelf": {
+    "surface_z_m": 0.62,
+    "front_y_m": -0.08,
+    "depth_m": 0.42,
+    "bin_spacing_y_m": 0.22,
+    "slots": {
+      "S1": {
+        "x_m": 0.0,
+        "depth": 2
+      },
+      "S2": {
+        "x_m": 0.55,
+        "depth": 1
+      },
+      "S3": {
+        "x_m": 1.05,
+        "depth": 1
+      }
+    }
+  },
+  "park": {
+    "x_m": -0.45,
+    "y_m": 0.06,
+    "surface_z_m": 0.62
+  },
+  "reception": {
+    "x_m": 1.95,
+    "y_m": -0.12,
+    "surface_z_m": 0.55,
+    "size_xy_m": [
+      0.34,
+      0.3
+    ]
+  },
+  "bin": {
+    "size_xyz_m": [
+      0.19,
+      0.18,
+      0.065
+    ],
+    "wall_m": 0.007,
+    "lip_h_m": 0.01,
+    "post_r_m": 0.005,
+    "head_r_m": 0.013,
+    "head_h_m": 0.005,
+    "handle_rise_m": 0.038,
+    "mass_kg": 0.5
+  },
+  "tray": {
+    "size_xyz_m": [
+      0.25,
+      0.16,
+      0.035
+    ],
+    "wall_m": 0.006,
+    "compartments": 3,
+    "post_r_m": 0.005,
+    "head_r_m": 0.013,
+    "head_h_m": 0.005,
+    "handle_rise_m": 0.024,
+    "mass_kg": 0.35
+  },
+  "motion": {
+    "joint_speed_rad_s": 0.9,
+    "move_timeout_s": 20.0,
+    "settle_steps": 5,
+    "settle_pos_tol_m": 0.004,
+    "settle_vel_tol": 0.02
+  },
+  "grasp": {
+    "open_ctrl": 255,
+    "close_ctrl": 0,
+    "lift_test_m": 0.05
+  },
+  "cameras": {
+    "wrist_w": 320,
+    "wrist_h": 240,
+    "overview_w": 640,
+    "overview_h": 360
+  }
+}
