@@ -29,13 +29,13 @@ class Controller:
         self.sim = sim
         self.skills = Skills(sim)
         self.motion = self.skills.motion
-        self.events = []
+        self.events: list[dict[str, object]] = []
         self.max_retries = 2
-        self._placed = []         # tray drop cells used — load balancing
-        self._placed_skus = []
-        self._confirmed_empty = set()
-        self._order = {}
-        self._bin_sku = {}
+        self._placed: list[tuple[float, float]] = []
+        self._placed_skus: list[str] = []
+        self._confirmed_empty: set[str] = set()
+        self._order: dict[str, int] = {}
+        self._bin_sku: dict[str, str] = {}
         self.blocked = False
         if perception not in ("oracle", "vision"):
             raise ValueError(f"unknown perception mode {perception!r}")
@@ -94,7 +94,7 @@ class Controller:
         self.skills.servo(tp + np.array([0, 0, 0.36]), DOWN_X, 0.08,
                           "observe_tray")
         st, hits = self.vision.observe_region(
-            tp[:2], (0.115, 0.075), floor_z=tp[2], shrink=0.02, z_band=0.095)
+            tp[:2], (0.115, 0.09), floor_z=tp[2], shrink=0.02, z_band=0.095)
         return st, hits
 
     # ---------- top level ----------
@@ -169,7 +169,7 @@ class Controller:
                 # instead of the neck: fing width >0.0155 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.0045, 0.0155)):
+                                              pinch_band=(0.0055, 0.0155)):
                     self.log("pick_miss", piece="?", bin=bin_id)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
@@ -233,6 +233,20 @@ class Controller:
                                  rescued=True)
                         continue
                     self.log("place_miss", piece=name, bin=bin_id)
+                    if self._piece_in_tray(name, sku):
+                        self._placed.append(comp)
+                        self._placed_skus.append(sku)
+                        got += 1
+                        self.log("unit_picked", piece=name, bin=bin_id,
+                                 rescued=True)
+                elif self._piece_in_tray(name, sku):
+                    # bounced/perched pieces can settle inside after the
+                    # verify window — count it instead of declaring it lost
+                    self._placed.append(comp)
+                    self._placed_skus.append(sku)
+                    got += 1
+                    self.log("unit_picked", piece=name, bin=bin_id,
+                             rescued=True)
                 else:
                     self.log("piece_lost", piece=name)
                 continue
@@ -242,6 +256,19 @@ class Controller:
             self.log("unit_picked", piece=name, bin=bin_id)
         return got
 
+    def _piece_in_tray(self, name, sku):
+        """Check containment after delayed settling."""
+        if self.vision:
+            for _ in range(3):
+                self.spin(40)
+            return self._make_tray_verify(sku)()
+        tp = self.sim.truth_body_pos("tray")
+        tq = _quat_mat(self.sim.truth_body_quat("tray"))
+        com = self.sim.data.xipos[self.sim.model.body(name).id]
+        rel = tq.T @ (com - tp)
+        return (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
+                and 0.0 < rel[2] < 0.098)
+
     def _make_tray_verify(self, sku):
         """Vision place check: the piece must be SEEN inside the tray floor
         band after settling — the observed unit count must grow by one."""
@@ -249,9 +276,13 @@ class Controller:
         expected[sku] += 1
 
         def verify():
-            st, hits = self._perceive_tray()
-            self.log("tray_observed", status=st, seen=len(hits))
-            return st == "ok" and Counter(s for s, _p in hits) == expected
+            for _ in range(4):
+                st, hits = self._perceive_tray()
+                self.log("tray_observed", status=st, seen=len(hits))
+                if st == "ok" and Counter(s for s, _p in hits) == expected:
+                    return True
+                self.spin(50)
+            return False
         return verify
 
     def _rescue_spot(self, sku):
@@ -268,7 +299,7 @@ class Controller:
             if detected_sku != sku:
                 continue
             p = np.asarray(p)
-            if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.075
+            if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.09
                     and p[2] < tp[2] + 0.055):
                 continue  # properly inside — not the stray
             if p[2] > tp[2] - 0.01:
@@ -277,15 +308,21 @@ class Controller:
         return None, False
 
     def _next_comp(self, tall=False):
-        """Next drop cell: opposite side of the accumulated x-moment so the
-        tray stays balanced for the final mast pinch. Tall pieces go to the
-        centre compartment — walls on both sides stop the tip-over."""
+        """Next drop slot: each unit gets its own cell+row — stacking a drop
+        on a previous piece tips it onto the rim and out. The slot order
+        alternates x-sides so the tray's x-moment stays ~0 for the final
+        mast pinch; tall pieces take the centre cells (walled both sides)."""
         if tall:
-            return (0.0, 0.022 if len(self._placed) % 2 == 0 else -0.022)
-        moment = sum(c[0] for c in self._placed)
-        cx = -0.079 if moment > 0 else 0.079
-        n_side = sum(1 for c in self._placed if c[0] == cx)
-        return (cx, 0.022 if n_side % 2 == 0 else -0.022)
+            seq = [(0.0, -0.03), (0.0, 0.03),
+                   (-0.079, -0.03), (0.079, 0.03)]
+        else:
+            seq = [(-0.079, -0.03), (0.079, -0.03),
+                   (0.079, 0.03), (-0.079, 0.03),
+                   (0.0, -0.03), (0.0, 0.03)]
+        for c in seq:
+            if c not in self._placed:
+                return c
+        return seq[0]
 
     def _piece_in_bin(self, name, bin_id):
         p = self.piece_pos_oracle(name)
@@ -554,7 +591,7 @@ class Controller:
         counts = {}
         for n in self.sim.piece_qadr:
             rel = tq.T @ (self.sim.data.xipos[self.sim.model.body(n).id] - tp)
-            if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075 \
+            if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09 \
                     and 0.0 < rel[2] < 0.10:
                 sku = self._bin_sku.get(self.sim.piece_bin.get(n), "?")
                 counts[sku] = counts.get(sku, 0) + 1

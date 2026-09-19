@@ -11,7 +11,9 @@ from .scene import tray_pocket_world
 from .sim import DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.022    # gp above piece origin -> pads pinch post under head
+PINCH_GP_OFFSET = 0.016    # low on the post: deeper pad wrap; the head brim
+                           # still blocks slip-out and the base top stays
+                           # 8 mm below the pad line
 
 
 DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
@@ -159,7 +161,7 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0035, 0.0235)):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0055, 0.019)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
         when the piece is held. Caller supplies the perceived piece position;
         `pinch_band` tightens the encoder acceptance (vision picks)."""
@@ -178,10 +180,16 @@ class Skills:
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
                        DOWN_X, 0.05, "pick_reject_lift")
             return False
-        # test lift: raise 5 cm; drop detection uses encoder + optional truth
-        self.servo(self.sim.grasp_point() + np.array([0, 0, 0.05]),
+        # test lift: raise 11 cm — the hanging piece's base must clear the
+        # bin's front wall (65 mm) before any lateral move, otherwise it
+        # hooks the wall on extraction and pops out of the pads
+        self.servo(self.sim.grasp_point() + np.array([0, 0, 0.11]),
                    DOWN_X, 0.03, "test_lift")
         self.spin(10)
+        # post-lift drop check: pads on empty air = piece already gone
+        f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
+        if f < 0.003:
+            return False
         return True
 
     def place_in_tray(self, piece_name=None, comp_xy=(-0.02, 0.05),
@@ -231,13 +239,13 @@ class Skills:
         # below the rim-lip band is contained during transport — perched on
         # a divider is fine (the lips keep it in). Perched ON the lip itself
         # (z >= ~0.10) or outside the footprint counts as a miss.
-        for _ in range(10):
+        for _ in range(45):
             self.spin(40)
             com = self.sim.data.xipos[self.sim.model.body(piece_name).id]
             tq = _quat_mat(self.sim.truth_body_quat("tray"))
             rel = tq.T @ (com - self.sim.truth_body_pos("tray"))
-            if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075
-                    and 0.0 < rel[2] < 0.095):
+            if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
+                    and 0.0 < rel[2] < 0.098):
                 return True
         return False
 

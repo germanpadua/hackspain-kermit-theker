@@ -85,7 +85,7 @@ anterior de una cadena física completa no se reprodujo en esa revisión.
 Localización RGB-D en los 3 bins frontales, semillas 7, 8 y 9 (9 observaciones,
 conteos correctos en ambas versiones):
 
-| Error XY | Base `c60c429` | Esta rama |
+| Error XY | Base `c60c429` | Antes de integrar la base (`ea10ac2`) |
 |---|---:|---:|
 | Media | 16,739 mm | 2,946 mm |
 | Máximo | 20,787 mm | 7,044 mm |
@@ -114,6 +114,12 @@ El benchmark conserva **todos** los episodios, incluidos fallos. Los cambios
 en verificación impiden comparar porcentajes antiguos y nuevos sin indicar
 qué criterio se utilizó. Una muestra pequeña tampoco demuestra fiabilidad
 industrial.
+
+La base `74e05b2` amplía la bandeja, separa los huecos de descarga y mejora
+el agarre y la espera de asentamiento. Su documentación declara entregas
+completas en visión (seed 7) y oracle (7 y 12) con su criterio anterior.
+Estas mejoras se conservan, pero las entregas deben medirse de nuevo con
+el evaluador físico independiente antes de atribuirlas a esta integración.
 
 ### Hipótesis y límites
 

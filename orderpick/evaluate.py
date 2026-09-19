@@ -44,10 +44,9 @@ def _run_episode(sim, perception, retries, recipe_path):
         ctl.spin()
     fulfilled = ctl.fulfill(order, slot_map(sim))
     delivered = ctl.deliver_tray() if not ctl.blocked and (fulfilled or ctl._placed) else False
-    wall = time.monotonic() - t0
-
     kinds = Counter(e["kind"] for e in ctl.events)
     assessment = verify_delivery(sim, order)
+    wall = time.monotonic() - t0
     exact = assessment.exact
     reason = None
     if not exact:

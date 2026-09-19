@@ -180,7 +180,7 @@ def add_bin(spec, config, entry, rgba):
                  size[1] / 2 - b["wall_m"] / 2, rgba, entry["id"], scale=1.15)
     body.add_geom(name=f"{entry['id']}_mass", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, 0.02], size=[0.05, 0.05, 0.02],
-                  contype=0, conaffinity=0, mass=b["mass_kg"])
+                  contype=0, conaffinity=0, mass=b["mass_kg"], rgba=[0, 0, 0, 0])
     return body
 
 
@@ -202,14 +202,16 @@ def add_piece(spec, sku_id, sku_info, name):
     ib = r * 0.7071
     body.add_geom(name=f"{name}_g", type=mujoco.mjtGeom.mjGEOM_BOX,
                   size=[ib, ib, base_h / 2], pos=[0, 0, base_h / 2],
-                  mass=sku_info["mass_kg"], friction=friction, rgba=rgb)
+                  mass=sku_info["mass_kg"], friction=friction, rgba=rgb,
+                  solref=[0.06, 0.8], solimp=[0.55, 0.75, 0.002, 0.5, 2])
     body.add_geom(name=f"{name}_vis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, 0, base_h / 2], size=[r, base_h / 2, 0],
                   contype=0, conaffinity=0, rgba=rgb)
     body.add_geom(name=f"{name}_neck", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, base_h + post_h / 2],
                   size=[0.007, 0.007, post_h / 2],
-                  friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+                  friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1],
+                  solref=[0.06, 0.8], solimp=[0.55, 0.75, 0.002, 0.5, 2])
     body.add_geom(name=f"{name}_fin", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, base_h + post_h / 2],
                   size=[0.011, 0.0035, post_h / 2],
@@ -217,7 +219,8 @@ def add_piece(spec, sku_id, sku_info, name):
     body.add_geom(name=f"{name}_head", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, base_h + post_h + head_h / 2],
                   size=[0.016, 0.016, head_h / 2],
-                  friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+                  friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1],
+                  solref=[0.06, 0.8], solimp=[0.55, 0.75, 0.002, 0.5, 2])
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
                   pos=[0, 0, base_h + post_h + head_h / 2],
                   size=[0.016, head_h / 2, 0],
@@ -230,24 +233,27 @@ def add_tray(spec, config, cart_body):
     size = t["size_xyz_m"]
     px, py, pz = config["tray_pocket_xyz_m"]
     # full-height lips keep the tray seated; the wider gap leaves a few
-    # degrees of tilt before a slightly canted tray wedges on lift-out
+    # degrees of tilt before a slightly canted tray wedges on lift-out.
+    # Rails are thin: thick ones would overhang the cart plate edge.
     lip = size[2] + 0.005
+    lip_t = 0.012
     gap = 0.005
     for side in (-1, 1):
         cart_body.add_geom(name=f"pocket_x{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
-                           pos=[px + side * (size[0] / 2 + gap + lip / 2), py, pz + lip / 2],
-                           size=[lip / 2, size[1] / 2 + gap + lip, lip / 2], rgba=list(STEEL))
+                           pos=[px + side * (size[0] / 2 + gap + lip_t / 2), py, pz + lip / 2],
+                           size=[lip_t / 2, size[1] / 2 + gap + lip_t, lip / 2], rgba=list(STEEL))
         cart_body.add_geom(name=f"pocket_y{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
-                           pos=[px, py + side * (size[1] / 2 + gap + lip / 2), pz + lip / 2],
-                           size=[size[0] / 2 + gap + lip, lip / 2, lip / 2], rgba=list(STEEL))
+                           pos=[px, py + side * (size[1] / 2 + gap + lip_t / 2), pz + lip / 2],
+                           size=[size[0] / 2 + gap + lip_t, lip_t / 2, lip / 2], rgba=list(STEEL))
     tray = spec.worldbody.add_body(name="tray", pos=[0, 0, 0])
     tray.add_freejoint(name="tray_free")
     _walls(tray, size, t["wall_m"], size[2], TRAY_COLOR, "tray")
     # inward rim lip: a resting piece cannot tip out during cart transport —
     # escaping now requires being perched near rim height first, which the
-    # place verifier rejects and retries
+    # place verifier rejects and retries. Kept shallow: the gripper pads
+    # open wide on release and must stay inside the lip gap.
     w = t["wall_m"]
-    lip_in = 0.009
+    lip_in = 0.006
     for side in (-1, 1):
         tray.add_geom(name=f"tray_lipx{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
                       pos=[side * (size[0] / 2 - w - lip_in / 2), 0,
@@ -269,7 +275,8 @@ def add_tray(spec, config, cart_body):
                       rgba=list(TRAY_COLOR))
     _post_handle(tray, t, t["wall_m"], size[2], 0.0, (0.85, 0.75, 0.25, 1), "tray")
     tray.add_geom(name="tray_mass", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, 0.01],
-                  size=[0.06, 0.05, 0.01], contype=0, conaffinity=0, mass=t["mass_kg"])
+                  size=[0.06, 0.05, 0.01], contype=0, conaffinity=0,
+                  mass=t["mass_kg"], rgba=[0, 0, 0, 0])
     return tray
 
 
