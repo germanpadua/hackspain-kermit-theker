@@ -179,7 +179,13 @@ class Skills:
             return False
         self.servo([pos[0], pos[1], gpz + 0.10], DOWN_X, 0.12, "approach")
         if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04, "grasp"):
-            return False
+            # the descend can stall from an awkward approach branch — back
+            # off and try once more from height (bounded, not blind)
+            self.servo([pos[0], pos[1], gpz + 0.16], DOWN_X, 0.06,
+                       "grasp_backoff")
+            if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04,
+                              "grasp_retry"):
+                return False
         self.close(1.0)
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
         if not (pinch_band[0] < f < pinch_band[1]):

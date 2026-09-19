@@ -219,9 +219,12 @@ def add_piece(spec, sku_id, sku_info, name):
                   pos=[0, 0, base_h + post_h + head_h / 2],
                   size=[0.016, 0.016, head_h / 2],
                   friction=[2.0, 0.05, 0.005], rgba=[0.25, 0.25, 0.27, 1])
+    # marker cap: sits proud of the head box so the SKU hue is actually
+    # rendered from above (a marker flush with the head box is occluded by
+    # the box's own faces)
     body.add_geom(name=f"{name}_headvis", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                  pos=[0, 0, base_h + post_h + head_h / 2],
-                  size=[0.016, head_h / 2, 0],
+                  pos=[0, 0, base_h + post_h + head_h + 0.0008],
+                  size=[0.0165, 0.0018, 0],
                   contype=0, conaffinity=0, rgba=rgb)
     return body
 

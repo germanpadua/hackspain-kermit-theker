@@ -10,8 +10,12 @@ encoder and by tray/piece observations; controller never reads body truth.
 """
 from __future__ import annotations
 
+import os
+
+import cv2
 import numpy as np
 
+from . import skills as skills_mod
 from .ik import IKSolver
 from .motion import Motion
 from .perception import WristVision
@@ -69,16 +73,21 @@ class Controller:
         front-most first. The controller never sees piece names — only
         perceived positions of the expected SKU."""
         e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
-        bo = bin_origin(self.sim.config, e["slot"], e["depth_row"])
-        tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
         row = self._bin_row.get(bin_id, e["depth_row"])
-        if row != e["depth_row"]:
-            bo = bin_origin(self.sim.config, e["slot"], row)
+        bo = bin_origin(self.sim.config, e["slot"], row)
+        tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
         self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
         half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
                 self.sim.config["bin"]["size_xyz_m"][1] / 2)
         st, hits = self.vision.observe_bin(bin_id, bo[:2], half,
                                            floor_z=bo[2])
+        if st != "ok" and skills_mod.DUMP_DIR:
+            os.makedirs(skills_mod.DUMP_DIR, exist_ok=True)
+            rgb = self.sim.render("wrist")
+            cv2.imwrite(
+                f"{skills_mod.DUMP_DIR}/obs_{st}_{bin_id}_"
+                f"t{self.sim.data.time:.0f}.png",
+                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         units = []
         for s, p in sorted((h for h in hits if h[0] == sku),
                            key=lambda h: h[1][1]):
