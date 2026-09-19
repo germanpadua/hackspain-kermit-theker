@@ -10,7 +10,7 @@ import numpy as np
 from .ik import IKSolver
 from .motion import Motion
 from .scene import tray_pocket_world
-from .sim import DOWN_X, HOME, STOW, CellSim
+from .sim import DOWN, DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
 PINCH_GP_OFFSET = 0.016    # pads clamp below the retaining head
@@ -155,44 +155,59 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0045, 0.0135)):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0045, 0.022)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
         when the piece is held. Caller supplies the perceived piece position;
         `pinch_band` tightens the encoder acceptance (vision picks)."""
         pos = np.asarray(pos_xyz, float)
         gpz = pos[2] + PINCH_GP_OFFSET
-        self.open(0.4)
+        # half-open descend: fully-open pads (100 mm) reach bin walls when the
+        # piece sits near an edge; a ~40 mm gap still clears the yawed head
+        # diagonal (34 mm) but stays inside any wall for centred pieces
+        self.motion.grip(130, duration_s=0.5, label="semiopen")
+        self.run()
         # normalize the approach branch: after an observe pose the arm can be
         # on a config that cannot descend straight into the tote — stowing
         # first makes every pick start from the same reachable branch
         self.motion.move_arm(STOW, duration_s=0.9, label="pre_pick")
         self.run()
-        if not self.hover_to(np.array([pos[0], pos[1], gpz + 0.20]), DOWN_X, [0, 0, 0]):
+        if not self.hover_to(np.array([pos[0], pos[1], gpz + 0.20]), DOWN, [0, 0, 0]):
             self.last_fail = "hover"
             return False
-        self.servo([pos[0], pos[1], gpz + 0.10], DOWN_X, 0.12, "approach")
-        if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04, "grasp"):
+        self.servo([pos[0], pos[1], gpz + 0.10], DOWN, 0.12, "approach")
+        if not self.servo([pos[0], pos[1], gpz], DOWN, 0.04, "grasp"):
             # the descend can stall from an awkward approach branch — back
             # off and try once more from height (bounded, not blind)
-            self.servo([pos[0], pos[1], gpz + 0.16], DOWN_X, 0.06,
+            self.servo([pos[0], pos[1], gpz + 0.16], DOWN, 0.06,
                        "grasp_backoff")
-            if not self.servo([pos[0], pos[1], gpz], DOWN_X, 0.04,
+            if not self.servo([pos[0], pos[1], gpz], DOWN, 0.04,
                               "grasp_retry"):
                 self.last_fail = "grasp_stall"
                 return False
         self.close(1.0)
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))
         if not (pinch_band[0] < f < pinch_band[1]):
+            if DUMP_DIR:
+                cam = mujoco.MjvCamera()
+                pp = np.asarray(pos, float)
+                cam.lookat[:] = [pp[0], pp[1], pp[2] + 0.03]
+                cam.distance = 0.30
+                cam.azimuth = 160
+                cam.elevation = -35
+                image = self.sim.render(cam, w=640, h=480)
+                cv2.imwrite(f"{DUMP_DIR}/reject_f{f:.3f}_"
+                            f"t{self.sim.data.time:.0f}.png",
+                            cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             self.open(0.4)  # release whatever was caught, then lift clear
             self.servo(self.sim.grasp_point() + np.array([0, 0, 0.12]),
-                       DOWN_X, 0.05, "pick_reject_lift")
+                       DOWN, 0.05, "pick_reject_lift")
             self.last_fail = f"band:{f:.4f}"
             return False
         # test lift: raise 11 cm — the hanging piece's base must clear the
         # bin's front wall (65 mm) before any lateral move, otherwise it
         # hooks the wall on extraction and pops out of the pads
         self.servo(self.sim.grasp_point() + np.array([0, 0, 0.11]),
-                   DOWN_X, 0.03, "test_lift")
+                   DOWN, 0.03, "test_lift")
         self.spin(10)
         # post-lift drop check: pads on empty air = piece already gone
         f = float(np.mean(self.sim.data.qpos[self.sim.fing_qadr]))

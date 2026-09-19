@@ -189,11 +189,8 @@ class Controller:
                     break
                 pos = units[0]
                 name = None     # the controller never sees piece names
-                # ~2cm pose error means the pinch can land on the head brim
-                # instead of the neck: fing width >0.0135 is a brim catch
-                # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.0045, 0.0135)):
+                                              pinch_band=(0.0045, 0.022)):
                     self.log("pick_miss", piece="?", bin=bin_id,
                              why=self.skills.last_fail)
                     continue
