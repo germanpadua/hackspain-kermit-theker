@@ -85,6 +85,9 @@
     ],
     "wall_m": 0.006,
     "compartments": 3,
+    "compartment_skus": ["RODAMIENTO", "ESPARRAGO", "ENGRANAJE"],
+    "compartment_capacity": [1, 1, 2],
+    "drop_y_m": 0.041,
     "post_r_m": 0.006,
     "post_x_m": 0.004,
     "head_r_m": 0.0,
@@ -108,7 +111,13 @@
   "cameras": {
     "wrist_w": 320,
     "wrist_h": 240,
-    "overview_w": 640,
-    "overview_h": 360
+    "overview_w": 1280,
+    "overview_h": 720
+  },
+  "industrial": {
+    "title": "AUTONOMOUS TRANSMISSION KITTING",
+    "station": "ASSEMBLY 01",
+    "delivery_zone": "KIT READY",
+    "bench_xyz_m": [1.95, 0.48, 0.74]
   }
 }

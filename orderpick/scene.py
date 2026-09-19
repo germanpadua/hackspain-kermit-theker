@@ -16,13 +16,15 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from .industrial import add_context, label
+
 ROOT = Path(__file__).resolve().parents[1]
 PANDA_XML = ROOT / "assets" / "menagerie" / "franka_emika_panda" / "panda.xml"
 
 STEEL = (0.38, 0.43, 0.50, 1)
 SHELF_GRAY = (0.42, 0.47, 0.52, 1)
 BIN_COLORS = [(0.50, 0.50, 0.52, 1), (0.46, 0.46, 0.44, 1), (0.52, 0.50, 0.46, 1), (0.48, 0.46, 0.50, 1)]
-TRAY_COLOR = (0.72, 0.62, 0.20, 1)
+TRAY_COLOR = (0.58, 0.60, 0.62, 1)
 FLOOR_RGBA = (0.16, 0.19, 0.23, 1)
 PARK_RGBA = (0.45, 0.40, 0.55, 1)
 TABLE_RGBA = (0.55, 0.42, 0.30, 1)
@@ -165,7 +167,7 @@ def _post_handle(body, spec_cfg, base_z, rim_z, y, rgba, prefix, scale=1.0):
                   contype=0, conaffinity=0, rgba=list(rgba))
 
 
-def add_bin(spec, config, entry, rgba):
+def add_bin(spec, config, entry, rgba, reference):
     b = config["bin"]
     size = b["size_xyz_m"]
     origin = bin_origin(config, entry["slot"], entry["depth_row"])
@@ -181,6 +183,9 @@ def add_bin(spec, config, entry, rgba):
     body.add_geom(name=f"{entry['id']}_mass", type=mujoco.mjtGeom.mjGEOM_BOX,
                   pos=[0, 0, 0.02], size=[0.05, 0.05, 0.02],
                   contype=0, conaffinity=0, mass=b["mass_kg"], rgba=[0, 0, 0, 0])
+    row = "FRONT / PICK" if entry["depth_row"] == 0 else "RESERVE / FIFO"
+    label(spec, body, f"{entry['id']}_label", [0, -size[1] / 2 - .001, .025],
+          [size[0] - .008, .047], [reference, row])
     return body
 
 
@@ -228,7 +233,7 @@ def add_piece(spec, sku_id, sku_info, name):
     return body
 
 
-def add_tray(spec, config, cart_body):
+def add_tray(spec, config, catalog, cart_body):
     t = config["tray"]
     size = t["size_xyz_m"]
     px, py, pz = config["tray_pocket_xyz_m"]
@@ -273,7 +278,18 @@ def add_tray(spec, config, cart_body):
                       pos=[x, 0, size[2] / 2],
                       size=[t["wall_m"] / 2, size[1] / 2 - t["wall_m"], size[2] / 2],
                       rgba=list(TRAY_COLOR))
-    _post_handle(tray, t, t["wall_m"], size[2], 0.0, (0.85, 0.75, 0.25, 1), "tray")
+    for i, sku in enumerate(t["compartment_skus"]):
+        center = -inner / 2 + (i + .5) * inner / n
+        reference = catalog["skus"][sku]["reference"]
+        label(spec, tray, f"tray_compartment_{i}", [center, -size[1] / 2 - .001, .05],
+              [inner / n - .003, .07], [reference, f"MAX {t['compartment_capacity'][i]}"])
+        label(spec, tray, f"tray_nest_{i}", [center, 0, .0102],
+              [size[1] - .025, inner / n - .008], [reference],
+              front=False, quarter_turn=True)
+        label(spec, cart_body, f"pocket_label_{i}",
+              [px + center, py - size[1] / 2 - gap - lip_t - .001, pz + .05],
+              [inner / n - .003, .07], [reference, f"MAX {t['compartment_capacity'][i]}"])
+    _post_handle(tray, t, t["wall_m"], size[2], 0.0, (0.58, 0.60, 0.62, 1), "tray")
     tray.add_geom(name="tray_mass", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, 0.01],
                   size=[0.06, 0.05, 0.01], contype=0, conaffinity=0,
                   mass=t["mass_kg"], rgba=[0, 0, 0, 0])
@@ -284,7 +300,7 @@ def piece_name(bin_id: str, index: int) -> str:
     return f"piece_{bin_id}_{index}"
 
 
-def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
+def build_spec(config: dict, catalog: dict, scenario="nominal") -> mujoco.MjSpec:
     spec = mujoco.MjSpec()
     spec.option.timestep = config["timestep_s"]
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
@@ -330,6 +346,10 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
     arm_spec = mujoco.MjSpec.from_file(str(PANDA_XML))
     hand = next(b for b in arm_spec.bodies if b.name == "hand")
     hand.add_camera(name="wrist", pos=[0, 0, 0.115], xyaxes=[1, 0, 0, 0, -1, 0], fovy=70)
+    if scenario == "obs_occluded":
+        hand.add_geom(name="camera_occluder", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      pos=[0, 0, .21], size=[.10, .10, .001],
+                      rgba=[.18, .18, .18, 1], contype=0, conaffinity=0, mass=0)
     # Fingertip adapters: the stock pads pinch a short piece only along its
     # top rim, so it rotates out of the grip under load. Two small pads per
     # finger protrude slightly past the stock face at two depths, giving a
@@ -353,7 +373,7 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
                            friction=[2.0, 0.05, 0.005])
     spec.attach(arm_spec, frame=frame, prefix="")
 
-    add_tray(spec, config, cart)
+    add_tray(spec, config, catalog, cart)
 
     shelf = config["shelf"]
     depth = shelf["depth_m"]
@@ -404,7 +424,8 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
                            size=[0.02, 0.02, rc["surface_z_m"] / 2 - 0.02], rgba=list(STEEL))
 
     for i, entry in enumerate(catalog["bins"]):
-        add_bin(spec, config, entry, BIN_COLORS[i % len(BIN_COLORS)])
+        add_bin(spec, config, entry, BIN_COLORS[i % len(BIN_COLORS)],
+                catalog["skus"][entry["sku"]]["reference"])
         for k in range(entry["units"]):
             add_piece(spec, entry["sku"], catalog["skus"][entry["sku"]],
                       piece_name(entry["id"], k))
@@ -417,9 +438,16 @@ def build_spec(config: dict, catalog: dict) -> mujoco.MjSpec:
         body.add_geom(name=f"{name}_g", type=mujoco.mjtGeom.mjGEOM_BOX,
                       size=[0.06, 0.05, 0.05], mass=0.9,
                       rgba=[0.80, 0.12, 0.80, 1])  # magenta = obstacle marker
+        label(spec, body, f"{name}_label", [0, -.0503, 0], [.115, .07],
+              ["OCCUPIED", "DO NOT DELIVER"])
 
-    world.add_camera(name="overview", pos=[0.85, -1.75, 1.35],
-                     xyaxes=[0.95, 0.31, 0, -0.20, 0.62, 0.75], fovy=55)
+    add_context(spec, config, catalog)
+    world.add_camera(name="overview", pos=[1.35, -3.2, 2.05],
+                     xyaxes=[1, .13, 0, -.046, .35, .94], fovy=49)
+    world.add_camera(name="kit_detail", pos=[.24, -1.03, .88],
+                     xyaxes=[1, 0, 0, 0, .76, .65], fovy=43)
+    world.add_camera(name="assembly_detail", pos=[2.0, -.85, 1.28],
+                     xyaxes=[1, 0, 0, 0, .45, .89], fovy=62)
     world.add_camera(name="reception_cam",
                      pos=[rc["x_m"], rc["y_m"] - 0.02, rc["surface_z_m"] + 0.62],
                      xyaxes=[1, 0, 0, 0, 1, 0], fovy=55)

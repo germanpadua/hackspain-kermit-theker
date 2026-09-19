@@ -1,10 +1,12 @@
 """Owner of MuJoCo state, proprioception, camera rendering and oracle adapters."""
+import cv2
 import numpy as np
 import mujoco
 
 from warehouse.scene import load_config
-from orderpick.contracts import Snapshot
-from orderpick.scene import ROOT, bin_origin, bin_size, build_spec, piece_name, tray_pocket_world
+from orderpick.contracts import Phase, Snapshot
+from orderpick.orders import load_recipe, validate_tray_recipe
+from orderpick.scene import bin_origin, build_spec, piece_name, tray_pocket_world
 
 HOME = np.array([0, 0, 0, -1.57079, 0, 1.57079, -0.7853])
 STOW = np.array([0.35, -0.55, 0.0, -2.35, 0.0, 1.95, 0.75])
@@ -14,7 +16,8 @@ DOWN = np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], dtype=float)
 # Keeps the hand/wrist bulk outside the shelf footprint while fingers enter a bin.
 DOWN_X = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=float)
 SCENARIOS = ("nominal", "reserve_empty", "obs_glitch", "obs_occluded",
-             "park_blocked", "reception_blocked", "grasp_slip")
+             "park_blocked", "reception_blocked", "grasp_slip",
+             "front_empty", "piece_displaced", "delivery_out_of_tolerance")
 
 
 def yaw_mat(theta):
@@ -23,24 +26,32 @@ def yaw_mat(theta):
 
 
 class CellSim:
-    def __init__(self, seed=7, scenario="nominal"):
+    def __init__(self, seed=7, scenario="nominal", recipe_path=None):
         if scenario not in SCENARIOS:
             raise ValueError(f"Unknown scenario: {scenario}")
         self.config = load_config("cell")
         self.catalog = load_config("catalog")
+        self.recipe = load_recipe(self.catalog, recipe_path)
+        validate_tray_recipe(self.config, self.catalog, self.recipe)
+        self.catalog["order"] = {
+            "id": self.recipe.id, "workstation": self.recipe.workstation,
+            "lines": [{"sku": sku, "qty": qty} for sku, qty in self.recipe.lines]}
         self.seed = seed
         self.scenario = scenario
-        if scenario == "reserve_empty":
+        self.process_state = Phase.IDLE
+        if scenario in ("reserve_empty", "front_empty"):
             for e in self.catalog["bins"]:
-                if e["id"] == "bin-a-reserve":
+                if e["id"] == ("bin-a-reserve" if scenario == "reserve_empty" else "bin-a-front"):
                     e["units"] = 0
-        self.glitch_frames = {"obs_glitch": 4,
-                              "obs_occluded": 10**9}.get(scenario, 0)
-        spec = build_spec(self.config, self.catalog)
+        self.glitch_frames = 4 if scenario == "obs_glitch" else 0
+        self.config["reception"]["target_offset_xy_m"] = (
+            [.07, 0] if scenario == "delivery_out_of_tolerance" else [0, 0])
+        spec = build_spec(self.config, self.catalog, scenario=scenario)
         self.model = spec.compile()
+        self.model.vis.global_.offwidth = max(640, self.config["cameras"]["overview_w"])
+        self.model.vis.global_.offheight = max(480, self.config["cameras"]["overview_h"])
         self.data = mujoco.MjData(self.model)
-        self.renderer = None
-        self.renderer_depth = None
+        self.renderers: dict[tuple[int, int, bool], mujoco.Renderer] = {}
         self.fault = None
         self._index()
         self._scatter(seed)
@@ -149,10 +160,22 @@ class CellSim:
                 if e["id"] == "bin-a-front":
                     gid = int(self.model.geom("piece_bin-a-front_0_neck").id)
                     self.model.geom_friction[gid] = [0.15, 0.01, 0.001]
+        elif s == "piece_displaced":
+            adr = self.piece_qadr["piece_bin-a-front_0"]
+            self.data.qpos[adr] += .022
 
     def _set_obstacle(self, name, pos):
         adr = self.obstacle_qadr[name]
         self.data.qpos[adr:adr + 7] = [*pos, 1, 0, 0, 0]
+
+    def set_process_state(self, phase: Phase):
+        self.process_state = phase
+        active = (0 if phase == Phase.KIT_READY else
+                  2 if phase in (Phase.ORDER_INCOMPLETE, Phase.PERCEPTION_STOP) else 1)
+        colors = ([.15, .65, .4], [.9, .55, .1], [.8, .15, .15])
+        for i, color in enumerate(colors):
+            self.model.geom_rgba[self.model.geom(f"stack_light_{i}").id, :3] = (
+                np.array(color) * (1 if i == active else .25))
 
     # ---------- commands (called by Motion/adapters) ----------
     def command_cart(self, x):
@@ -190,27 +213,28 @@ class CellSim:
             ee_xmat=tuple(d.xmat[self.hand_id]),
             fault=self.fault)
 
-    def render(self, camera, depth=False):
-        w, h = (self.config["cameras"]["wrist_w"], self.config["cameras"]["wrist_h"]) \
+    def render(self, camera, depth=False, *, w=None, h=None):
+        default_w, default_h = (self.config["cameras"]["wrist_w"], self.config["cameras"]["wrist_h"]) \
             if camera == "wrist" else (self.config["cameras"]["overview_w"],
                                        self.config["cameras"]["overview_h"])
-        if depth:
-            if self.glitch_frames > 0 and camera == "wrist":
-                self.glitch_frames -= 1
-                return np.full((max(h, 360), max(w, 640)), np.nan)
-            if self.renderer_depth is None:
-                self.renderer_depth = mujoco.Renderer(
-                    self.model, height=max(h, 360), width=max(w, 640))
-                self.renderer_depth.enable_depth_rendering()
-            self.renderer_depth.update_scene(self.data, camera=camera)
-            return self.renderer_depth.render().copy()
-        if self.renderer is None:
-            self.renderer = mujoco.Renderer(self.model, height=max(h, 360), width=max(w, 640))
-        self.renderer.update_scene(self.data, camera=camera)
-        frame = self.renderer.render().copy()
+        h, w = max(h or default_h, 360), max(w or default_w, 640)
+        key = (w, h, depth)
+        if key not in self.renderers:
+            self.renderers[key] = mujoco.Renderer(self.model, height=h, width=w)
+            if depth:
+                self.renderers[key].enable_depth_rendering()
+        renderer = self.renderers[key]
+        renderer.update_scene(self.data, camera=camera)
+        frame = renderer.render().copy()
         if self.glitch_frames > 0 and camera == "wrist":
             self.glitch_frames -= 1
-            frame = np.zeros_like(frame)
+            frame = np.full((h, w), np.nan) if depth else np.zeros_like(frame)
+        if camera != "wrist" and not depth:
+            cv2.rectangle(frame, (0, 0), (w, 65), (18, 26, 34), -1)
+            cv2.putText(frame, f"{self.recipe.id} | {self.process_state}", (18, 27),
+                        cv2.FONT_HERSHEY_SIMPLEX, .65, (230, 236, 241), 1, cv2.LINE_AA)
+            cv2.putText(frame, f"SCENARIO: {self.scenario} | ORACLE LOGISTICS | CONTACT SIMULATION",
+                        (18, 52), cv2.FONT_HERSHEY_SIMPLEX, .48, (185, 197, 208), 1, cv2.LINE_AA)
         return frame
 
     # ---------- evaluator-only truth API ----------
@@ -236,7 +260,6 @@ class CellSim:
         return [self.model.geom(g).name or f"geom{g}" for g in out]
 
     def close(self):
-        for r in (self.renderer, self.renderer_depth):
-            if r is not None:
-                r.close()
-        self.renderer = self.renderer_depth = None
+        for renderer in self.renderers.values():
+            renderer.close()
+        self.renderers.clear()

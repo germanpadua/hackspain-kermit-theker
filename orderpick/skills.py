@@ -1,9 +1,11 @@
 """Contact manipulation with visual place callbacks and oracle logistics guards."""
 from __future__ import annotations
 
-import numpy as np
-
 import os
+
+import cv2
+import mujoco
+import numpy as np
 
 from .ik import IKSolver
 from .motion import Motion
@@ -40,19 +42,13 @@ class Skills:
         self._dump_idx = 0
 
     def _dump_frame(self):
-        import cv2
-        import mujoco
         cam = mujoco.MjvCamera()
         tp = self.sim.truth_body_pos("tray")
         cam.lookat[:] = tp + np.array([0, 0, 0.14])
         cam.distance = 0.28
         cam.azimuth = 90
         cam.elevation = -5
-        if self.sim.renderer is None:
-            self.sim.renderer = mujoco.Renderer(self.sim.model, height=480,
-                                                width=640)
-        self.sim.renderer.update_scene(self.sim.data, camera=cam)
-        img = self.sim.renderer.render().copy()
+        img = self.sim.render(cam, w=640, h=480)
         cv2.imwrite(f"{DUMP_DIR}/f{self._dump_idx:04d}_"
                     f"t{self.sim.data.time:.1f}.png",
                     cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
@@ -62,8 +58,7 @@ class Skills:
         for _ in range(n):
             self.sim.step(self.sim.config["control_steps"])
             self.motion.tick(self.sim.snapshot())
-            if DUMP_DIR and (self.hold_guard or getattr(
-                    self.motion.op, "label", "").startswith(
+            if DUMP_DIR and (self.hold_guard or self.motion.active_label.startswith(
                     ("tray", "pinch", "reseat"))):
                 self._dump_tick += 1
                 if self._dump_tick % 12 == 0:

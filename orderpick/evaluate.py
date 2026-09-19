@@ -21,13 +21,15 @@ from pathlib import Path
 from warehouse.persistence import RunLog
 
 from .controller import Controller
+from .contracts import Phase
 from .orders import load_recipe, perception_scope, slot_map
+from .scene import load_config
 from .sim import SCENARIOS, CellSim
-from .verification import verify_delivery
+from .verification import assess_delivery, verify_delivery
 
 
 def run_episode(seed, scenario, perception, retries, recipe_path=None):
-    sim = CellSim(seed=seed, scenario=scenario)
+    sim = CellSim(seed=seed, scenario=scenario, recipe_path=recipe_path)
     try:
         return _run_episode(sim, perception, retries, recipe_path)
     finally:
@@ -37,16 +39,23 @@ def run_episode(seed, scenario, perception, retries, recipe_path=None):
 def _run_episode(sim, perception, retries, recipe_path):
     ctl = Controller(sim, perception=perception)
     ctl.max_retries = retries
-    recipe = load_recipe(sim.catalog, recipe_path)
+    recipe = sim.recipe
     order = recipe.lines
     t0 = time.monotonic()
     for _ in range(15):
         ctl.spin()
     fulfilled = ctl.fulfill(order, slot_map(sim))
-    delivered = ctl.deliver_tray() if not ctl.blocked and (fulfilled or ctl._placed) else False
-    kinds = Counter(e["kind"] for e in ctl.events)
+    if not ctl.blocked:
+        ctl.spin(50)
+        if assess_delivery(sim, order).kit_exact:
+            ctl.set_state(Phase.KIT_PREPARED)
+    delivered = ctl.deliver_tray() if not ctl.blocked and fulfilled else False
     assessment = verify_delivery(sim, order)
+    ctl.set_state(Phase.KIT_READY if assessment.exact else (
+        Phase.PERCEPTION_STOP if ctl.blocked else Phase.ORDER_INCOMPLETE))
     wall = time.monotonic() - t0
+    kinds = Counter(e["kind"] for e in ctl.events)
+    states = Counter(e["state"] for e in ctl.events if e["kind"] == "process_state")
     exact = assessment.exact
     reason = None
     if not exact:
@@ -57,7 +66,8 @@ def _run_episode(sim, perception, retries, recipe_path):
                 reason = k
                 break
         else:
-            reason = "incomplete" if not fulfilled else "not_delivered"
+            reason = ("wrong_compartment" if assessment.misplaced_units else
+                      "incomplete" if not fulfilled else "not_delivered")
     ep = {
         "seed": sim.seed, "scenario": sim.scenario, "perception": perception,
         "scope": perception_scope(perception), "recipe_id": recipe.id, "order": order,
@@ -65,6 +75,12 @@ def _run_episode(sim, perception, retries, recipe_path):
         "on_table": assessment.on_table, "content": assessment.content, "exact": exact,
         "assessment": assessment.as_dict(),
         "verification_window_s": 0.5,
+        "state": sim.process_state.value,
+        "state_counts": dict(states),
+        "incomplete": not exact,
+        "perception_stop": ctl.blocked,
+        "missing_units": sum(assessment.missing.values()),
+        "misplaced_units": len(assessment.misplaced_units),
         "reason": reason, "sim_time_s": round(float(sim.data.time), 1),
         "wall_time_s": round(wall, 1),
         "pick_miss": kinds.get("pick_miss", 0),
@@ -85,6 +101,11 @@ def summarize(eps):
     agg = {
         "episodes": n,
         "exact_deliveries": sum(1 for e in eps if e["exact"]),
+        "incomplete_orders": sum(e["incomplete"] for e in eps),
+        "perception_stops": sum(e["perception_stop"] for e in eps),
+        "missing_units": sum(e["missing_units"] for e in eps),
+        "misplaced_units": sum(e["misplaced_units"] for e in eps),
+        "state_counts": dict(sum((Counter(e["state_counts"]) for e in eps), Counter())),
         "fulfilled": sum(1 for e in eps if e["fulfilled"]),
         "delivered": sum(1 for e in eps if e["delivered"]),
         "false_success": sum(1 for e in eps if e["fulfilled"] and e["delivered"]
@@ -129,9 +150,15 @@ def main():
     if any(s not in SCENARIOS for s in scenarios):
         ap.error(f"Scenarios must be chosen from {SCENARIOS}")
 
+    try:
+        recipe = load_recipe(load_config("catalog"), args.recipe)
+    except (ValueError, OSError) as error:
+        ap.error(str(error))
     run = RunLog(args.output or "runs",
                  {"demo": "orderpick-eval", "seeds": seeds,
-                  "modes": modes, "scenarios": scenarios})
+                  "modes": modes, "scenarios": scenarios, "recipe_id": recipe.id,
+                  "order": recipe.lines, "workstation": recipe.workstation,
+                  "scope": {mode: perception_scope(mode) for mode in modes}})
     out = run.path
     episodes = []
     for scenario in scenarios:

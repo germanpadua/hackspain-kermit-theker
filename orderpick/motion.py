@@ -7,7 +7,7 @@ position-actuated and the arm tracks interpolated joint setpoints.
 import numpy as np
 import mujoco
 
-from orderpick.sim import GRASP_OFFSET, HOME, STOW
+from orderpick.sim import GRASP_OFFSET, STOW
 
 
 class OpStatus:
@@ -28,6 +28,12 @@ class Motion:
     @property
     def active(self):
         return self.op is not None
+
+    @property
+    def active_label(self):
+        if isinstance(self.op, (_ArmMove, _ArmServo, _GripMove)):
+            return self.op.label
+        return ""
 
     # ---- public commands -------------------------------------------------
     def drive_cart(self, x_target):

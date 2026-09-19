@@ -2,6 +2,7 @@
   "skus": {
     "ENGRANAJE": {
       "name": "Engranaje M4",
+      "reference": "GEAR-M4",
       "marker_hue": [0, 30],
       "shape": "cylinder",
       "radius_m": 0.024,
@@ -16,6 +17,7 @@
     },
     "RODAMIENTO": {
       "name": "Rodamiento 6204",
+      "reference": "BEARING-6204",
       "marker_hue": [80, 115],
       "shape": "cylinder",
       "radius_m": 0.021,
@@ -30,6 +32,7 @@
     },
     "ESPARRAGO": {
       "name": "Esparrago M8x60",
+      "reference": "STUD-M8X60",
       "marker_hue": [35, 79],
       "shape": "box",
       "size_xy_m": [
@@ -77,8 +80,8 @@
     }
   ],
   "order": {
-    "id": "REDUCTOR-DEMO-001",
-    "workstation": "Puesto de montaje de reductores industriales",
+    "id": "WO-2026-0142",
+    "workstation": "TRANSMISSION / ASSEMBLY 01",
     "lines": [
       {
         "sku": "ENGRANAJE",

@@ -1,17 +1,19 @@
-"""Shared dataclasses and enumerations for the order-picking cell demo.
-
-The controller only ever sees Snapshot/Observation objects produced by the
-adapters. Simulator truth is reserved for the independent evaluator.
-"""
+"""Cell contracts; product observations coexist with oracle-assisted logistics."""
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 
 XYZ = tuple[float, float, float]
 
 
 class Phase(StrEnum):
+    ORDER_RECEIVED = "ORDER_RECEIVED"
+    PICKING = "PICKING"
+    TOTE_DEPLETED = "TOTE_DEPLETED"
+    KIT_PREPARED = "KIT_PREPARED"
+    KIT_READY = "KIT_READY"
+    ORDER_INCOMPLETE = "ORDER_INCOMPLETE"
+    PERCEPTION_STOP = "PERCEPTION_STOP"
     IDLE = "IDLE"
     PLAN = "PLAN"
     DRIVE = "DRIVE"
@@ -144,4 +146,4 @@ class Event:
     type: str
     sim_time_s: float
     wall_time_s: float
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, object] = field(default_factory=dict)

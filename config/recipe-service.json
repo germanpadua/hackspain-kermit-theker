@@ -1,6 +1,6 @@
 {
-  "id": "REDUCTOR-SERVICIO-001",
-  "workstation": "Preparación de kit de mantenimiento del reductor",
+  "id": "WO-2026-M0142",
+  "workstation": "TRANSMISSION / MAINTENANCE 01",
   "lines": [
     {"sku": "ENGRANAJE", "qty": 1},
     {"sku": "RODAMIENTO", "qty": 1}

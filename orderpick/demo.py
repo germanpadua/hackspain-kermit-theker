@@ -11,9 +11,10 @@ import mujoco.viewer
 from warehouse.persistence import RunLog
 
 from .controller import Controller
-from .orders import load_recipe, perception_scope, slot_map
+from .contracts import Phase
+from .orders import perception_scope, slot_map
 from .sim import SCENARIOS, CellSim
-from .verification import verify_delivery
+from .verification import assess_delivery, verify_delivery
 
 
 def main():
@@ -30,13 +31,13 @@ def main():
                     help="save overview PNG sequence (not encoded video)")
     args = ap.parse_args()
 
-    sim = CellSim(seed=args.seed, scenario=args.scenario)
+    try:
+        sim = CellSim(seed=args.seed, scenario=args.scenario, recipe_path=args.recipe)
+    except (ValueError, OSError) as error:
+        ap.error(str(error))
     viewer = None
     try:
-        try:
-            recipe = load_recipe(sim.catalog, args.recipe)
-        except (ValueError, OSError) as error:
-            ap.error(str(error))
+        recipe = sim.recipe
         ctl = Controller(sim, perception=args.perception)
         scope = perception_scope(args.perception)
         run = RunLog(args.run_dir, {
@@ -48,6 +49,8 @@ def main():
             frames.mkdir()
         if not args.headless:
             viewer = mujoco.viewer.launch_passive(sim.model, sim.data)
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+            viewer.cam.fixedcamid = sim.model.camera("overview").id
         n_frame = 0
         orig_spin = ctl.skills.spin
         started = time.monotonic()
@@ -58,6 +61,10 @@ def main():
             if viewer is not None:
                 if not viewer.is_running():
                     raise KeyboardInterrupt
+                viewer.set_texts((mujoco.mjtFontScale.mjFONTSCALE_150,
+                                  mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                  f"{recipe.id}\n{sim.process_state.value}",
+                                  "CONTACT SIMULATION\nORACLE LOGISTICS"))
                 viewer.sync()
             if args.video and n_frame % 5 == 0:
                 cv2.imwrite(str(frames / f"o{n_frame:06d}.png"),
@@ -71,17 +78,24 @@ def main():
             for _ in range(15):
                 ctl.spin()
             fulfilled = ctl.fulfill(recipe.lines, slot_map(sim))
-            if not ctl.blocked and (fulfilled or ctl._placed):
+            if not ctl.blocked:
+                ctl.spin(50)
+                if assess_delivery(sim, recipe.lines).kit_exact:
+                    ctl.set_state(Phase.KIT_PREPARED)
+            if not ctl.blocked and fulfilled:
                 delivered = ctl.deliver_tray()
         except KeyboardInterrupt:
             interrupted = True
         assessment = verify_delivery(sim, recipe.lines)
+        ctl.set_state(Phase.KIT_READY if assessment.exact and not interrupted else (
+            Phase.PERCEPTION_STOP if ctl.blocked else Phase.ORDER_INCOMPLETE))
         result = {
             "seed": args.seed, "perception": args.perception, "scope": scope,
             "recipe_id": recipe.id, "order": recipe.lines,
             "fulfilled": fulfilled, "delivered": delivered, "interrupted": interrupted,
             "tray_content": assessment.content, "verified": assessment.exact and not interrupted,
             "assessment": assessment.as_dict(),
+            "state": sim.process_state.value,
             "verification_window_s": 0.5,
             "sim_time_s": round(float(sim.data.time), 1),
             "wall_time_s": round(time.monotonic() - started, 1), "events": ctl.events}
