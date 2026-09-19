@@ -6,9 +6,12 @@ Final evaluation lives separately in verification.py.
 from __future__ import annotations
 
 from collections import Counter
+import os
 
+import cv2
 import numpy as np
 
+from . import skills as skills_mod
 from .perception import WristVision
 from .orders import compartment_bounds, compartment_for
 from .contracts import Phase
@@ -75,16 +78,21 @@ class Controller:
         front-most first. The controller never sees piece names — only
         perceived positions of the expected SKU."""
         e = next(b for b in self.sim.catalog["bins"] if b["id"] == bin_id)
-        bo = bin_origin(self.sim.config, e["slot"], e["depth_row"])
         row = self._bin_row.get(bin_id, e["depth_row"])
-        if row != e["depth_row"]:
-            bo = bin_origin(self.sim.config, e["slot"], row)
+        bo = bin_origin(self.sim.config, e["slot"], row)
         tgt = np.array([bo[0], bo[1] - 0.05, bo[2] + 0.33])
         self.skills.servo(tgt, DOWN_X, 0.10, "observe")  # partial reach ok
         half = (self.sim.config["bin"]["size_xyz_m"][0] / 2,
                 self.sim.config["bin"]["size_xyz_m"][1] / 2)
         st, hits = self.vision.observe_bin(bin_id, bo[:2], half,
                                            floor_z=bo[2])
+        if st != "ok" and skills_mod.DUMP_DIR:
+            os.makedirs(skills_mod.DUMP_DIR, exist_ok=True)
+            rgb = self.sim.render("wrist")
+            cv2.imwrite(
+                f"{skills_mod.DUMP_DIR}/obs_{st}_{bin_id}_"
+                f"t{self.sim.data.time:.0f}.png",
+                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         units = []
         for s, p in sorted((h for h in hits if h[0] == sku),
                            key=lambda h: h[1][1]):
@@ -185,7 +193,7 @@ class Controller:
                 # instead of the neck: fing width >0.0155 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.0055, 0.0155)):
+                                              pinch_band=(0.007, 0.0155)):
                     self.log("pick_miss", piece="?", bin=bin_id)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
@@ -504,6 +512,11 @@ class Controller:
             seat = tray + tq @ np.array([0.0, 0.0, TRAY_POST_GP_Z])
             side = tq @ np.array([0.047, 0.0, 0.0])
             sk.open(0.55)
+            # waypoint high over the tray first: a stowed arm near a
+            # kinematic limit unfolds into a bad branch when asked to reach
+            # under+side directly — the over-the-top waypoint fixes that
+            sk.hover_to(tray + np.array([0.0, 0.0, 0.42]), DOWN_X,
+                        [0, 0, 0])
             if not sk.hover_to(under + side, DOWN_X, [0, 0, 0.18]):
                 self.log("tray_approach_fail", leg="hover",
                          hand=[round(float(v), 3) for v in
