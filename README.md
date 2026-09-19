@@ -1,20 +1,45 @@
-# THEKER — kits para montaje de reductores
+# THEKER — kitting autónomo de conjuntos de transmisión
 
 > **Implementación principal: preparación y entrega de kits de componentes.**
-> La sección [Demo THEKER](#demo-theker--preparación-de-pedido) describe la
+> La sección [Demo THEKER](#demo-theker--célula-industrial-de-kitting) describe la
 > nueva implementación (`orderpick/`); el resto del documento es el
 > prototipo anterior (`warehouse/`), conservado como referencia ejecutable.
 
 **Tarea humana elegida:** un operario consulta una orden, recorre el supermercado
 de componentes, cuenta referencias, prepara una bandeja, retira el recipiente
 agotado y entrega el kit al puesto de montaje de reductores industriales.
-`orderpick/` automatiza ese ciclo en simulación. **No ensambla el reductor.**
+`orderpick/` implementa ese ciclo en simulación, con las limitaciones de
+repetibilidad publicadas abajo. **No ensambla el reductor.**
 El kit de demostración no es una lista de materiales de un producto comercial;
 la aplicación y el utillaje deben contrastarse con THEKER.
 
 ---
 
-## Demo THEKER — preparación de pedido
+## Demo THEKER — célula industrial de kitting
+
+**«WO-2026-0142 necesita un kit. El robot lee la receta, recoge las piezas,
+gestiona el tote agotado, llena la bandeja poka-yoke y la entrega en la
+estación de montaje».**
+
+El puesto `ASSEMBLY 01` tiene un banco, armario y carcasa de transmisión
+abierta; el panel muestra orden, referencias y cantidades. Los totes están
+etiquetados `FRONT`/`RESERVE`; el frontal de engranajes contiene una unidad y
+la reserva dos. La mesa de entrega dice `KIT READY`, el retorno de vacíos
+está señalizado, y la célula tiene delimitación amarilla, panel de proceso y
+torre luminosa. `KIT PREPARATION ONLY` y `ASSEMBLY OUT OF SCOPE` hacen visible
+el alcance: preparar y entregar componentes para un montaje posterior.
+
+| Referencia visible | SKU en receta | Compartimento | Capacidad | Producción | Mantenimiento |
+|---|---|---:|---:|---:|---:|
+| `BEARING-6204` | `RODAMIENTO` | 0 | 1 | 1 | 1 |
+| `STUD-M8X60` | `ESPARRAGO` | 1 | 1 | 1 | 0 |
+| `GEAR-M4` | `ENGRANAJE` | 2 | 2 | 2 | 1 |
+
+Las recetas externas son `config/recipe-production.json` (`WO-2026-0142`)
+y `config/recipe-service.json` (`WO-2026-M0142`). Cambian el pedido y el panel,
+sin aumentar el stock. Los nidos de la bandeja tienen separadores y etiquetas
+por referencia; son una aproximación de utillaje poka-yoke, no nidos
+industriales mecanizados para piezas comerciales.
 
 Brazo **Franka Emika Panda** (MuJoCo Menagerie, commit `8161bba`, assets
 vendorizados con licencia) con pinza paralela, montado sobre un **carro
@@ -22,7 +47,7 @@ actuado en un carril** frente a una estantería de 3 slots. El carro lleva
 además la bandeja de pedido (3 compartimentos, labios de contención, asa
 tipo "sillín") y una **cámara de muñeca** calibrada (RGB-D).
 
-Ciclo sin intervención humana:
+Ciclo ejecutado sin intervención humana; una ejecución puede terminar incompleta:
 
 1. Pedido `2×ENGRANAJE + 1×RODAMIENTO + 1×ESPARRAGO`.
 2. El carro se desplaza a cada slot (actuador, no teletransporte).
@@ -36,29 +61,43 @@ Ciclo sin intervención humana:
 4. Pinza física por contacto sobre el cuello de cada pieza; verificación
    por encoder de pinza y por re-observación (la unidad objetivo debe
    desaparecer del recipiente).
-5. Depósito en la bandeja a bordo, con compartimentos balanceados.
+5. Depósito en el compartimento asignado a cada SKU, con capacidad limitada.
 6. Si el recipiente frontal queda vacío: se retira al aparcamiento de
    vacíos (verificando antes que está libre) y se **adelanta la reserva**
    físicamente enganchando el recipiente posterior.
 7. El carro lleva la bandeja a recepción (bandeja estable en el bolsillo);
    se verifica que la mesa está libre, se recoge la bandeja por el asa
    (soporte mecánico por compresión sobre las almohadillas) y se deposita.
-8. Evaluación independiente: contenido exacto por SKU, bandeja dentro de la
+8. Evaluación independiente: contenido exacto por SKU, cantidad y compartimento,
+   geometría de contacto contenida en el nido, capacidad, bandeja dentro de la
    mesa, orientación, contacto de soporte, ausencia de contacto con pinza,
    piezas apoyadas en la bandeja y estabilidad durante 0,5 s. Un pedido
    parcial, con sobrantes o sostenido por la pinza **no es un éxito**.
 
 Una observación fuera de cámara o con profundidad ilegible queda `unknown`.
 El frontal solo se retira tras confirmar su vacío; agotar reintentos de agarre
-no confirma agotamiento de stock.
+no confirma agotamiento de stock. Una observación necesaria que sigue siendo
+desconocida tras reintentos limita el movimiento y termina en `PERCEPTION_STOP`.
+Los eventos y la torre registran `ORDER_RECEIVED`, `PICKING`, `TOTE_DEPLETED`,
+`ADVANCE_RESERVE`, `KIT_PREPARED`, `KIT_READY`, `ORDER_INCOMPLETE` y
+`PERCEPTION_STOP`. `KIT_READY` depende de la evaluación independiente.
 
 ```bash
-MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --seed 7 --perception vision --headless
-MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7:8 --modes oracle,vision --scenarios nominal
+MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --seed 7 --perception vision --headless \
+  --recipe config/recipe-production.json
+MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7:9 \
+  --modes oracle,vision --scenarios nominal --recipe config/recipe-production.json
 
 # Otra receta con el mismo catálogo, sin cambiar el controlador
 MUJOCO_GL=egl .venv/bin/python -m orderpick.demo --headless --perception vision \
   --recipe config/recipe-service.json
+MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7:9 \
+  --modes oracle,vision --scenarios nominal --recipe config/recipe-service.json
+
+# Fallos de percepción, recogida y entrega; la receta corta permite aislar la entrega
+MUJOCO_GL=egl .venv/bin/python -m orderpick.evaluate --seeds 7 --modes oracle,vision \
+  --recipe config/recipe-service.json \
+  --scenarios front_empty,piece_displaced,obs_occluded,obs_glitch,park_blocked,reception_blocked,delivery_out_of_tolerance,grasp_slip
 ```
 
 En `orderpick.evaluate`, `7:8` incluye ambas semillas; los rangos del prototipo
@@ -67,15 +106,19 @@ código 1, incluso si contiene escenarios de fallo intencionado.
 
 `--recipe` acepta JSON con `id`, `workstation` y `lines: [{"sku": "...", "qty": 1}]`.
 Se rechazan referencias inexistentes, cantidades no enteras/positivas y líneas
-duplicadas. Cambiar la receta no aumenta el stock ni modifica la escena.
+duplicadas, así como pedidos que superen la capacidad del nido correspondiente.
 
 `--video` guarda una **secuencia PNG**, no vídeo codificado, de `overview`.
 `--run-dir` es la carpeta padre: siempre se crea una subcarpeta única.
 `metadata.json` identifica la receta, ayudas oraculares y hash de fuentes
 incluyendo `orderpick/`; `result.json` guarda comprobación física y eventos.
 Sin `--headless` se abre el visor nativo; no usar `MUJOCO_GL=egl` para ese modo.
+Las cámaras `overview`, `kit_detail` y `assembly_detail` muestran la célula,
+la bandeja y la estación. Las vistas renderizadas incluyen orden, estado,
+escenario y las etiquetas `ORACLE LOGISTICS` y `CONTACT SIMULATION`;
+la cámara RGB-D de muñeca no recibe esos overlays.
 
-### Auditoría y medición
+### Auditoría y medición histórica
 
 Base auditada: `c60c429`, rama `devin/theker-order-picking`.
 Sus 39 tests pasaron, pero el benchmark nominal seed 7 entregó **0/1 pedidos
@@ -90,9 +133,12 @@ conteos correctos en ambas versiones):
 | Media | 16,739 mm | 2,946 mm |
 | Máximo | 20,787 mm | 7,044 mm |
 
-La media baja un 82,4 %. **Todavía no cumple el objetivo de máximo 5 mm**:
-la herramienta de calibración termina con código 1. Esto mide localización
-de piezas visibles, no fiabilidad del ciclo completo ni escenas ocluidas.
+En esa revisión la media bajó un 82,4 %, pero el máximo superaba 5 mm y la
+calibración devolvía 1. Después de integrar los marcadores de `261070c`, la
+medición actual obtiene **media 1,742 mm y máximo 2,271 mm**, con 9/9 regiones
+legibles y conteos correctos; devuelve 0. Esta última comparación incluye
+cambios tanto de geometría como de percepción. Mide piezas visibles, no
+fiabilidad del ciclo completo ni escenas ocluidas.
 
 ```bash
 MUJOCO_GL=egl .venv/bin/python -m orderpick.calibrate --seeds 7 8 9
@@ -118,8 +164,83 @@ industrial.
 La base `74e05b2` amplía la bandeja, separa los huecos de descarga y mejora
 el agarre y la espera de asentamiento. Su documentación declara entregas
 completas en visión (seed 7) y oracle (7 y 12) con su criterio anterior.
-Estas mejoras se conservan, pero las entregas deben medirse de nuevo con
-el evaluador físico independiente antes de atribuirlas a esta integración.
+Estas mejoras se conservan junto con las de agarre y observación de `261070c`.
+Las cifras anteriores no corresponden a la célula industrial actual:
+el apartado siguiente aplica además la asignación estricta por compartimento.
+
+### Métricas de la célula industrial
+
+Los resultados por episodio incluyen `assessment.compartments`, piezas
+mal ubicadas y sin apoyo, faltantes, sobrantes, estados y causas de parada.
+`physical_drops` cuenta piezas en el suelo al terminar; `piece_lost` cuenta
+eventos de pérdida declarados por el controlador: no son la misma métrica.
+`obs_invalid` cuenta observaciones inválidas, incluso si un reintento permite
+continuar; `perception_stops` cuenta episodios detenidos por percepción.
+`false_success` cuenta señales optimistas `fulfilled && delivered` que la
+evaluación física rechaza, **no éxitos aceptados**. El tiempo real incluye la
+ventana de verificación de 0,5 s y excluye construir la escena y escribir JSON.
+
+Medición del 19-09-2026, base integrada `261070c`, código de `e3c04bb`.
+Semillas nominales **7, 8, 9**; cada fila suma sus tres episodios:
+
+| Receta / modo | Exactas | Incompletas | Unidades faltantes | En suelo / pérdidas declaradas | Paradas por percepción | Σ sim / Σ real (s) |
+|---|---:|---:|---:|---:|---:|---:|
+| Producción / oracle | 2/3 | 1 | 1 | 0 / 0 | 0 | 1040,8 / 105,4 |
+| Producción / vision | 0/3 | 3 | 6 | 3 / 3 | 0 | 1119,4 / 118,2 |
+| Mantenimiento / oracle | 3/3 | 0 | 0 | 0 / 0 | 0 | 607,1 / 56,9 |
+| Mantenimiento / vision | 0/3 | 3 | 3 | 3 / 3 | 0 | 541,5 / 59,7 |
+
+Producción oracle entrega las semillas 7 y 9; la 8 falla al recoger la
+segunda unidad desde la reserva. En visión quedan fallos de agarre en
+reserva y pérdida del rodamiento durante recogida/colocación. **La célula
+visual no completa ninguna de estas seis órdenes nominales**: no se debe
+presentar como autonomía sensorial ni producción repetible.
+
+Antes de priorizar la pieza más frontal de la reserva, la integración daba
+0/3 en producción oracle con el mismo evaluador. La corrección de Z usando
+el marcador RGB-D elimina los 18 `pick_miss` nominales de mantenimiento
+visual, pero descubre tres pérdidas posteriores: **mejorar localización
+no ha resuelto la entrega**. Se conservan ambos lotes.
+
+Matriz de fallos, semilla **7**, una ejecución por modo y fila:
+
+| Escenario / receta | Exactas oracle / vision | Evidencia y alcance |
+|---|---:|---|
+| `front_empty` / mantenimiento | 0 / 0 | Avanza reserva, pero falla la recogida posterior |
+| `piece_displaced` / mantenimiento | 1 / 0 | Desplazamiento inicial de 22 mm; visión pierde rodamiento |
+| `obs_occluded` / mantenimiento | 1 / 0 | Visión se detiene tras 3 observaciones UNKNOWN; oracle no usa esa cámara |
+| `obs_glitch` / mantenimiento | 1 / 0 | Visión registra 2 observaciones inválidas y continúa; falla después |
+| `park_blocked` / mantenimiento | 1 / 0 | La receta no necesita reserva; no ejercita ese bloqueo |
+| `reception_blocked` / mantenimiento | 0 / 0 | Oracle rechaza la estación; visión falla antes de llegar |
+| `delivery_out_of_tolerance` / mantenimiento | 0 / 0 | Oracle declara descarga, pero la evaluación rechaza la bandeja desviada; visión falla antes |
+| `grasp_slip` / mantenimiento | 1 / 0 | Bajar fricción no fuerza una caída en oracle; visión pierde rodamiento |
+| `reserve_empty` / producción | 0 / 0 | Cantidad insuficiente; ninguna entrega se acepta |
+| `park_blocked` / producción | 0 / 0 | Ambos modos rechazan aparcamiento y no avanzan reserva |
+
+En los **32 episodios**: 10 entregas exactas y 22 órdenes incompletas/no
+entregadas; 31 unidades faltantes, 12 piezas en suelo, 12 eventos de pérdida,
+0 piezas mal ubicadas, 5 observaciones inválidas y 1 parada por percepción.
+Tiempo acumulado: **6673,9 s simulados / 673,6 s reales**. Hubo una señal
+optimista `false_success` del controlador, en la descarga desviada; el
+evaluador la rechazó. No sumar fallos gestionados a entregas correctas ni
+usar esta mezcla de nominales y fallos como tasa de fiabilidad.
+
+Artefactos completos, incluidos fallos y eventos:
+
+- `runs/kitting-production/20260919T070515-5b8b3404c7`
+- `runs/kitting-service/20260919T070516-680b36bbd7`
+- `runs/kitting-faults/20260919T070517-f1c00c023d`
+- `runs/kitting-reserve/20260919T070518-e85f54b910`
+- `runs/kitting-calibration/20260919T070844-adce11569a`
+- Comparación anterior: `runs/integrated-production/20260919T070122-3176773c95`
+  y `runs/integrated-service/20260919T070123-ca39ac2abb`.
+
+Los cinco lotes de medición `kitting-*` listados registran el mismo `source_sha256`:
+`7790bfc73427b10c5c8dd6405cd71625fed51e97dc1a6c9b8c54e6a3808754bf`.
+Se ejecutaron antes de registrar el commit `e3c04bb`; el hash de fuentes se
+comprobó idéntico después. Los tiempos de pared proceden de procesos
+concurrentes en la VM; no son medidas de hardware industrial. `runs/` se
+exporta como evidencia, no está versionado.
 
 ### Hipótesis y límites
 
@@ -128,6 +249,9 @@ el evaluador físico independiente antes de atribuirlas a esta integración.
   general de productos.
 - Las bandas HSV están en `config/catalog.json`. Añadir una referencia
   necesita calibración de su marcador, geometría y bin, no solo un nombre.
+- La cota de recogida se calcula con profundidad RGB-D y la altura conocida
+  del marcador del proxy (`PART_MARKER_TOP_M`); requiere piezas erguidas.
+  No se sustituye esa profundidad por la altura nominal del fondo del tote.
 - Las geometrías son peones con cuello y cabeza adaptados a la pinza, no
   engranajes/rodamientos/espárragos industriales completos. Algunas superficies
   son visuales; los contactos usan geometrías simplificadas. La masa efectiva
@@ -138,24 +262,31 @@ el evaluador físico independiente antes de atribuirlas a esta integración.
   visibilidad son heurísticos; no certifican ausencia de oclusiones pequeñas.
 - Recipientes, bandeja y monitor de deslizamiento usan poses oraculares.
   La bandeja puede moverse y caer: no equivale a una pose fija calibrada.
-- `obs_glitch`/`obs_occluded` inyectan fotogramas corruptos/ausentes en la
-  cámara de muñeca; `grasp_slip` pulimenta la fricción del post de una
-  pieza; `park_blocked`/`reception_blocked` colocan un obstáculo magenta
-  físico sobre la superficie.
+- `front_empty` deja el tote frontal sin piezas, conservando la reserva;
+  `reserve_empty` vacía la reserva; `piece_displaced` desplaza 22 mm la
+  pieza frontal de engranaje. Son cambios de condiciones iniciales.
+- `obs_glitch` inyecta RGB negro y profundidad inválida transitorios;
+  `obs_occluded` instala una cubierta opaca ante la cámara. `grasp_slip`
+  reduce la fricción del cuello; `park_blocked`/`reception_blocked` colocan
+  un obstáculo magenta físico, con señal de ocupación.
+- `delivery_out_of_tolerance` desvía 70 mm la consigna de descarga, sin mover
+  la zona aceptada por el evaluador. Una mesa ocupada se rechaza; una descarga
+  apoyada fuera de tolerancia tampoco es exacta.
 - Sin ROS, servicios, LLM ni frontend; un proceso posee la simulación.
 - No hay validación con hardware, reconocimiento general de piezas, planificación
   general de colisiones ni recuperación tras reiniciar el proceso.
 
 ### Prioridades siguientes para competir
 
-1. Medir repetibilidad del kit completo y el fallo físico dominante antes de
-   ampliar la escena. Publicar entregas exactas, parciales, caídas y tiempos.
+1. Corregir los fallos de agarre, traslado y colocación identificados en los
+   JSON por episodio; repetir ambas recetas y modos con el mismo evaluador.
+   La entrega del kit completo debe ser repetible antes de ampliar el alcance.
 2. Sustituir las poses oraculares de logística por percepción de recipientes
    y bandeja y sensores de agarre. Mantener la verdad solo en evaluación.
 3. Validar con THEKER la tarea humana, tiempos, BOM y utillaje; sustituir peones
    por geometrías reales y medir holguras y variabilidad efectiva.
-4. Demostrar otra receta, una perturbación y una parada por observación
-   desconocida. Los fallos gestionados no se cuentan como pedidos entregados.
+4. Ampliar la muestra de semillas y probar reservas y estación ocupada con
+   ambas recetas. Los fallos gestionados no cuentan como pedidos entregados.
 5. Llevar al jurado una diapositiva con tarea, ciclo, métricas y límites; un
    vídeo de respaldo no sustituye la ejecución en directo.
 
@@ -163,14 +294,24 @@ el evaluador físico independiente antes de atribuirlas a esta integración.
 
 ```bash
 MUJOCO_GL=egl .venv/bin/python -m pytest -q
-uv tool run --from ruff==0.12.12 ruff check --select E9,F63,F7,F82 \
-  orderpick tests/test_orderpick_regressions.py warehouse/persistence.py
+uv tool run --from ruff==0.12.12 ruff check --select E9,F \
+  orderpick tests/test_orderpick_regressions.py tests/test_industrial_kitting.py \
+  warehouse/persistence.py
 uv tool run --from mypy==1.17.1 mypy --ignore-missing-imports --follow-imports=silent \
-  orderpick/orders.py orderpick/verification.py
+  orderpick warehouse/persistence.py
 ```
 
-El chequeo de tipos cubre los nuevos módulos de recetas y verificación; no
-equivale a tipar todo el controlador ni las librerías nativas.
+MyPy recorre los módulos actuales; su modo por defecto no comprueba los cuerpos
+sin anotaciones. No equivale a tipar estrictamente todo el controlador ni las
+librerías nativas. Los tests físicos cubren independencia del controlador,
+compartimentos equivocados, falta de apoyo, pinza sosteniendo la bandeja,
+descarga fuera de zona, oclusión real y visibilidad de piezas junto a la pared.
+
+Última ejecución: **81 tests aprobados**, Ruff sin errores y MyPy sin
+errores en 16 módulos. La escena se revisó con renders EGL de overview,
+bandeja y montaje; el visor nativo de `orderpick` no se probó en esta revisión.
+El smoke legacy y sus 20 episodios nominales también pasan; su transporte
+sigue siendo idealizado y esos resultados no se incluyen en la tabla de kitting.
 
 ---
 
