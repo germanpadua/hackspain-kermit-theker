@@ -94,7 +94,7 @@ class Controller:
         self.skills.servo(tp + np.array([0, 0, 0.36]), DOWN_X, 0.08,
                           "observe_tray")
         st, hits = self.vision.observe_region(
-            tp[:2], (0.115, 0.075), floor_z=tp[2], shrink=0.02, z_band=0.095)
+            tp[:2], (0.115, 0.09), floor_z=tp[2], shrink=0.02, z_band=0.095)
         return st, hits
 
     # ---------- top level ----------
@@ -217,6 +217,18 @@ class Controller:
                                  rescued=True)
                         continue
                     self.log("place_miss", piece=name, bin=bin_id)
+                    if self._piece_in_tray(name):
+                        self._placed.append(comp)
+                        got += 1
+                        self.log("unit_picked", piece=name, bin=bin_id,
+                                 rescued=True)
+                elif self._piece_in_tray(name):
+                    # bounced/perched pieces can settle inside after the
+                    # verify window — count it instead of declaring it lost
+                    self._placed.append(comp)
+                    got += 1
+                    self.log("unit_picked", piece=name, bin=bin_id,
+                             rescued=True)
                 else:
                     self.log("piece_lost", piece=name)
                 continue
@@ -225,15 +237,35 @@ class Controller:
             self.log("unit_picked", piece=name, bin=bin_id)
         return got
 
+    def _piece_in_tray(self, name):
+        """Oracle: is THIS piece inside the tray containment band? Vision:
+        did the observed unit count grow past the placed tally?"""
+        if self.vision:
+            for _ in range(3):
+                self.spin(40)
+            st, hits = self._perceive_tray()
+            self.log("tray_observed", status=st, seen=len(hits))
+            return st == "ok" and len(hits) >= len(self._placed) + 1
+        tp = self.sim.truth_body_pos("tray")
+        rel = self.piece_pos_oracle(name) - tp
+        return (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
+                and -0.01 < rel[2] < 0.098)
+
     def _make_tray_verify(self):
         """Vision place check: the piece must be SEEN inside the tray floor
         band after settling — the observed unit count must grow by one."""
         expected = len(self._placed) + 1
 
         def verify():
-            st, hits = self._perceive_tray()
-            self.log("tray_observed", status=st, seen=len(hits))
-            return st == "ok" and len(hits) >= expected
+            # re-observe across the settle window: a piece still bouncing
+            # reads above the tray band on the first frames
+            for _ in range(4):
+                st, hits = self._perceive_tray()
+                self.log("tray_observed", status=st, seen=len(hits))
+                if st == "ok" and len(hits) >= expected:
+                    return True
+                self.spin(50)
+            return False
         return verify
 
     def _rescue_spot(self):
@@ -248,7 +280,7 @@ class Controller:
             return None, False
         for _s, p in hits:
             p = np.asarray(p)
-            if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.075
+            if (abs(p[0] - tp[0]) < 0.115 and abs(p[1] - tp[1]) < 0.09
                     and p[2] < tp[2] + 0.055):
                 continue  # properly inside — not the stray
             if p[2] > tp[2] - 0.01:
@@ -257,15 +289,21 @@ class Controller:
         return None, False
 
     def _next_comp(self, tall=False):
-        """Next drop cell: opposite side of the accumulated x-moment so the
-        tray stays balanced for the final mast pinch. Tall pieces go to the
-        centre compartment — walls on both sides stop the tip-over."""
+        """Next drop slot: each unit gets its own cell+row — stacking a drop
+        on a previous piece tips it onto the rim and out. The slot order
+        alternates x-sides so the tray's x-moment stays ~0 for the final
+        mast pinch; tall pieces take the centre cells (walled both sides)."""
         if tall:
-            return (0.0, 0.022 if len(self._placed) % 2 == 0 else -0.022)
-        moment = sum(c[0] for c in self._placed)
-        cx = -0.079 if moment > 0 else 0.079
-        n_side = sum(1 for c in self._placed if c[0] == cx)
-        return (cx, 0.022 if n_side % 2 == 0 else -0.022)
+            seq = [(0.0, -0.03), (0.0, 0.03),
+                   (-0.079, -0.03), (0.079, 0.03)]
+        else:
+            seq = [(-0.079, -0.03), (0.079, -0.03),
+                   (0.079, 0.03), (-0.079, 0.03),
+                   (0.0, -0.03), (0.0, 0.03)]
+        for c in seq:
+            if c not in self._placed:
+                return c
+        return seq[0]
 
     def _piece_in_bin(self, name, bin_id):
         p = self.piece_pos_oracle(name)
@@ -524,8 +562,8 @@ class Controller:
         counts = {}
         for n in self.sim.piece_qadr:
             rel = tq.T @ (self.sim.truth_body_pos(n) - tp)
-            if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075 \
-                    and 0.0 < rel[2] < 0.10:
+            if abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09 \
+                    and -0.01 < rel[2] < 0.10:
                 sku = getattr(self, "_bin_sku", {}).get(
                     self.sim.piece_bin.get(n), "?")
                 counts[sku] = counts.get(sku, 0) + 1

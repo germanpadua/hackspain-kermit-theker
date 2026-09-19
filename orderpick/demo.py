@@ -51,9 +51,11 @@ def main():
     ap.add_argument("--run-dir", default=None)
     ap.add_argument("--video", action="store_true",
                     help="record overview+wrist PNG frames to <run>/frames")
+    ap.add_argument("--scenario", default="nominal",
+                    help="CellSim scenario (nominal, reception_blocked, ...)")
     args = ap.parse_args()
 
-    sim = CellSim(seed=args.seed)
+    sim = CellSim(seed=args.seed, scenario=args.scenario)
     ctl = Controller(sim, perception=args.perception)
     if args.run_dir:
         run = Path(args.run_dir)
@@ -98,8 +100,7 @@ def main():
         "seed": args.seed, "perception": args.perception,
         "order": order, "fulfilled": ok, "delivered": delivered,
         "tray_content": content,
-        "verified": delivered and all(
-            content.get(s, 0) >= q for s, q in order),
+        "verified": delivered and content == {s: q for s, q in order},
         "sim_time_s": round(sim_t, 1), "wall_time_s": round(wall, 1),
         "events": ctl.events,
     }

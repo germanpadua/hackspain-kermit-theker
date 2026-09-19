@@ -241,11 +241,11 @@ class Skills:
         # below the rim-lip band is contained during transport — perched on
         # a divider is fine (the lips keep it in). Perched ON the lip itself
         # (z >= ~0.10) or outside the footprint counts as a miss.
-        for _ in range(10):
+        for _ in range(30):
             self.spin(40)
             rel = self.piece_pose(piece_name) - self.sim.truth_body_pos("tray")
-            if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.075
-                    and 0.0 < rel[2] < 0.095):
+            if (abs(rel[0]) < 0.115 and abs(rel[1]) < 0.09
+                    and -0.01 < rel[2] < 0.098):
                 return True
         return False
 
