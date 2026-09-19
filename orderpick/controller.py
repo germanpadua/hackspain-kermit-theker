@@ -159,7 +159,7 @@ class Controller:
                 # instead of the neck: fing width >0.0155 is a brim catch
                 # (held but swings loose on the carry) — reject it
                 if not self.skills.pick_piece(pos, None,
-                                              pinch_band=(0.0055, 0.0155)):
+                                              pinch_band=(0.007, 0.0155)):
                     self.log("pick_miss", piece="?", bin=bin_id)
                     continue
                 # verify the pick: lift the held unit clear of the bin's
@@ -432,6 +432,11 @@ class Controller:
             seat = tray + tq @ np.array([0.0, 0.0, TRAY_POST_GP_Z])
             side = tq @ np.array([0.047, 0.0, 0.0])
             sk.open(0.55)
+            # waypoint high over the tray first: a stowed arm near a
+            # kinematic limit unfolds into a bad branch when asked to reach
+            # under+side directly — the over-the-top waypoint fixes that
+            sk.hover_to(tray + np.array([0.0, 0.0, 0.42]), DOWN_X,
+                        [0, 0, 0])
             if not sk.hover_to(under + side, DOWN_X, [0, 0, 0.18]):
                 self.log("tray_approach_fail", leg="hover",
                          hand=[round(float(v), 3) for v in

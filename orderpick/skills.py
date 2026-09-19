@@ -18,9 +18,9 @@ from .scene import tray_pocket_world
 from .sim import DOWN_X, HOME, STOW, CellSim
 
 GRIP_POST_LOCAL_Z = 0.022  # pinch zone centre above the piece origin
-PINCH_GP_OFFSET = 0.016    # low on the post: deeper pad wrap; the head brim
-                           # still blocks slip-out and the base top stays
-                           # 8 mm below the pad line
+PINCH_GP_OFFSET = 0.019    # mid-neck: pads clamp the post while the fin tips
+                           # (x±11 mm) act as chocks — a pitch out of the
+                           # channel end digs the fin into the pad face
 
 
 DUMP_DIR = os.environ.get("ORDERPICK_DUMP", "")
@@ -115,7 +115,7 @@ class Skills:
         return (np.linalg.norm(self.sim.grasp_point() - np.asarray(target, float))
                 < tol)
 
-    def hover_to(self, p, mat, off):
+    def hover_to(self, p, mat, off, speed_scale=1.0):
         tgt = np.asarray(p, float) + np.asarray(off, float)
         q, err = self.ik.solve_restarts(tgt, mat, seeds=(HOME,))
         if q is None or err > 0.006:
@@ -123,7 +123,7 @@ class Skills:
             # servo solves incrementally and often still reaches the target.
             ok = self.servo(tgt, mat, 0.08, "hover_fb")
             return ok and self._arrived(tgt)
-        self.motion.move_arm(q)
+        self.motion.move_arm(q, speed_scale=speed_scale)
         ok = self.run()
         if not (ok and self._arrived(tgt)):
             # IK decimetre error or a mid-settle check — servo refines it
@@ -168,7 +168,7 @@ class Skills:
         return self.piece_pose(name)[2] > 0.63 + min_z
 
     # --- skills ---------------------------------------------------------
-    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.0055, 0.019)):
+    def pick_piece(self, pos_xyz, piece_name, pinch_band=(0.007, 0.019)):
         """Approach open -> descend -> pinch post -> verify lift. Returns True
         when the piece is held. Caller supplies the perceived piece position;
         `pinch_band` tightens the encoder acceptance (vision picks)."""
@@ -212,12 +212,15 @@ class Skills:
                           DOWN_X, 0.035, "clear"):
             pass
         # joint-space waypoints: the mid heights solve IK cleanly where a
-        # straight-line servo stalls near singularities
-        if not self.hover_to(tp + np.array([0, 0, 0.50]), DOWN_X, [0, 0, 0]):
+        # straight-line servo stalls near singularities. Halved joint speed:
+        # the swing's acceleration is what works a shallow pinch loose.
+        if not self.hover_to(tp + np.array([0, 0, 0.50]), DOWN_X, [0, 0, 0],
+                             speed_scale=0.45):
             return False
         # the pocket mouth is a tight corridor: joint-space IK lands on a
-        # branch that cannot descend into it — servo straight down instead
-        self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.04, "pre")
+        # branch that cannot descend into it — servo straight down instead.
+        # Keep it brisk: a shallow pinch creeps loose over a slow swing.
+        self.servo(tp + np.array([0, 0, 0.30]), DOWN_X, 0.08, "pre")
         # carry-drop check: encoder reads open air if the piece slipped
         # during the swing — abort before releasing into the walls
         if float(np.mean(self.sim.data.qpos[self.sim.fing_qadr])) < 0.003:
